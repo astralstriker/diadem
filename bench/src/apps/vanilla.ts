@@ -1,4 +1,6 @@
 import { vanilla } from '../vanilla'
 import { report } from './_measure'
 
-report(vanilla.cold().value())
+void (async () => {
+  report((await vanilla.cold()).value())
+})()

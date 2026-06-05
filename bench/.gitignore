@@ -1,6 +1,7 @@
 node_modules/
 dist/
 src/diadem/generated/
+src/gen/
 package-lock.json
 RESULTS.md
 BUNDLE.md

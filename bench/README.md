@@ -32,16 +32,23 @@ asserts before benchmarking, so the graphs are provably equivalent.
 npm run build          # in the repo root, so the file:.. dep is fresh
 cd bench && npm install
 
+npm run report         # everything → a single bench/RESULTS.md
+# or individual sections:
 npm run bench          # cold build + hot resolve (tinybench)
 npm run bundlesize     # esbuild bundle size, minified + gzipped
 npm run coldstart      # process startup time + retained heap
-npm run all            # all of the above
+npm run scaling        # build time vs graph size
 ```
 
-Everything compiles with **`tsc`** (not esbuild/tsx) on purpose: tsyringe and
-inversify need `emitDecoratorMetadata`, which the esbuild-based runners don't
-produce. Bundle size is measured on the tsc-compiled output so the
-reflect-metadata frameworks' emitted type arrays are counted fairly.
+`npm run report` writes one consolidated `bench/RESULTS.md` (gitignored; the
+snapshot below is committed for convenience).
+
+The 11-service bench compiles with **`tsc`** (not esbuild/tsx) on purpose:
+tsyringe and inversify need `emitDecoratorMetadata`, which the esbuild-based
+runners don't produce. Bundle size is measured on the tsc-compiled output so the
+reflect-metadata frameworks' emitted type arrays are counted fairly. The scaling
+graphs are esbuild-transpiled (type-checking 300-service generated files OOMs
+tsc), so tsyringe — which needs decorator metadata — is omitted from that chart.
 
 ## Results
 
@@ -115,6 +122,22 @@ reflect-metadata containers (tsyringe ~2.6×, inversify ~14× slower) are
 distinguishable. Real apps resolve a handful of times at startup, not millions
 per second, so this metric rarely matters.
 
+### Scaling — build time as the graph grows
+
+Build time for the whole container at 10 → 300 services (ms, lower is better).
+
+| framework | N=10 | N=30 | N=100 | N=300 |
+| --- | ---: | ---: | ---: | ---: |
+| vanilla (hand-written) | 0.0001 | 0.0002 | 0.0005 | 0.0018 |
+| **diadem (compiled)** | **0.0017** | **0.0086** | **0.032** | **0.11** |
+| typed-inject | 0.0035 | 0.0084 | 0.052 | 0.25 |
+| inversify | 0.067 | 0.22 | 0.79 | 2.58 |
+
+diadem stays cheap as the graph grows: at 300 services it builds in ~0.1 ms,
+roughly 2.5× faster than typed-inject and ~23× faster than inversify (which is
+already ~40× costlier at 10 services). tsyringe behaves like inversify here but
+is omitted (it needs decorator metadata the transpile can't emit).
+
 ## Takeaways
 
 - **Bundle size** and **cold start** are where diadem's build-time design pays
@@ -122,6 +145,8 @@ per second, so this metric rarely matters.
   serverless). diadem compiled wins cold start outright and beats the
   reflect-metadata containers on size.
 - **Cold build** in-process: compiled mode is the fastest real container.
+- **Scaling**: diadem's build cost grows gently with graph size; inversify (and
+  reflect-metadata DI generally) climbs much faster.
 - **Hot resolve** is a wash among the fast group — ignore the small differences.
 
 ## Caveats

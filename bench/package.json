@@ -5,12 +5,15 @@
   "description": "Benchmarks for @devcraft-ts/diadem vs other TypeScript DI containers",
   "scripts": {
     "generate": "node ../dist/cli.js build --cwd . --scan-dir src/diadem --out src/diadem/generated/manifest.ts && node ../dist/cli.js build --cwd . --scan-dir src/diadem --emit compiled --out src/diadem/generated/container.ts --target-env production",
+    "gen:scaling": "node scaling-gen.mjs",
+    "gen:compile": "node gen-compile.mjs",
     "compile": "tsc -p tsconfig.json",
-    "prep": "npm run generate && npm run compile",
+    "prep": "npm run generate && npm run gen:scaling && npm run gen:compile && npm run compile",
+    "report": "npm run prep && node report.mjs",
     "bench": "npm run prep && node dist/run.js",
     "bundlesize": "npm run prep && node bundlesize.mjs",
     "coldstart": "npm run prep && node coldstart.mjs",
-    "all": "npm run prep && node dist/run.js && node bundlesize.mjs && node coldstart.mjs"
+    "scaling": "npm run prep && node scaling.mjs"
   },
   "dependencies": {
     "@devcraft-ts/diadem": "file:..",
