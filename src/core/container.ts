@@ -205,20 +205,21 @@ class DiademContainer implements DIContainer {
       throw new Error('Dependency token is undefined or null')
     }
 
-    // Check direct dependencies first
-    if (this.dependencies.has(token)) {
-      return this.dependencies.get(token) as T
+    // One Map.get() per registry on the hit path (registered values are always
+    // instances/factories, never undefined), instead of has() + get().
+    const direct = this.dependencies.get(token)
+    if (direct !== undefined) {
+      return direct as T
     }
 
-    // Check singletons
-    if (this.singletons.has(token)) {
-      return this.singletons.get(token) as T
+    const singleton = this.singletons.get(token)
+    if (singleton !== undefined) {
+      return singleton as T
     }
 
-    // Check factories (transient)
-    if (this.factories.has(token)) {
-      const factory = this.factories.get(token)
-      return factory?.() as T
+    const factory = this.factories.get(token)
+    if (factory !== undefined) {
+      return factory() as T
     }
 
     // Registered, but only as an async factory.
@@ -227,6 +228,11 @@ class DiademContainer implements DIContainer {
         `Dependency ${token?.name || 'Unknown'} is registered as an async ` +
           `factory; resolve it with resolveAsync() instead of resolve().`
       )
+    }
+
+    // Rare: a value of `undefined` was explicitly registered.
+    if (this.dependencies.has(token) || this.singletons.has(token)) {
+      return undefined as T
     }
 
     // Enhanced error message with more debugging info
