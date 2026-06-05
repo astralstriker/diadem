@@ -1,9 +1,10 @@
 # diadem benchmarks
 
-Compares `@devcraft-ts/diadem` against other TypeScript DI containers on a
-realistic dependency graph.
+Compares `@devcraft-ts/diadem` against other TypeScript DI containers across the
+metrics that actually matter: how big it bundles, how fast it cold-starts, how
+much it costs to build the graph, and (least interesting) how fast it resolves.
 
-## What it measures
+## The graph
 
 An 11-service graph, layered the way a real app tends to look:
 
@@ -21,71 +22,110 @@ UserService OrderService
         App (root)
 ```
 
-Every framework implements the **same** graph in its own idiom. Each service
-has a deterministic `value()`; the root must compute `2448`, which the harness
-asserts before benchmarking, so we know the graphs are equivalent.
-
-Two scenarios:
-
-- **Cold** — build a fresh container with all services registered as singletons,
-  then resolve the root. This is the build-vs-runtime story: it includes whatever
-  wiring/reflection each framework does.
-- **Hot** — resolve the root from an already-built container (a cached lookup).
+Every framework implements the **same** graph in its own idiom. Each service has
+a deterministic `value()`; the root must compute `2448`, which the harness
+asserts before benchmarking, so the graphs are provably equivalent.
 
 ## Running it
 
 ```bash
 npm run build          # in the repo root, so the file:.. dep is fresh
-cd bench
-npm install
-npm run bench          # generates diadem manifests, compiles with tsc, runs
+cd bench && npm install
+
+npm run bench          # cold build + hot resolve (tinybench)
+npm run bundlesize     # esbuild bundle size, minified + gzipped
+npm run coldstart      # process startup time + retained heap
+npm run all            # all of the above
 ```
 
-It compiles with **`tsc`** (not esbuild/tsx) on purpose: tsyringe and inversify
-need `emitDecoratorMetadata`, which the esbuild-based runners don't produce.
+Everything compiles with **`tsc`** (not esbuild/tsx) on purpose: tsyringe and
+inversify need `emitDecoratorMetadata`, which the esbuild-based runners don't
+produce. Bundle size is measured on the tsc-compiled output so the
+reflect-metadata frameworks' emitted type arrays are counted fairly.
 
-## Results (one run, for shape — run it yourself for your machine)
+## Results
 
-`Node v24` · linux/x64 · tinybench, 1s/task
+One machine (`Node v24`, linux/x64). Run it on yours — treat these as shape.
 
-### Cold: build + resolve
+### Bundle size — *the one to care about for frontend / edge*
+
+A minimal app (build the graph, resolve the root), bundled + minified by esbuild.
+
+| framework | gzipped | vs smallest |
+| --- | ---: | ---: |
+| vanilla (hand-written) | 0.6 KB | 1.0× |
+| typed-inject | 2.1 KB | 3.4× |
+| **diadem (compiled)** | **6.2 KB** | 9.9× |
+| tsyringe | 11.1 KB | 17.7× |
+| inversify | 22.1 KB | 35.3× |
+
+diadem is ~1.8× smaller than tsyringe and ~3.6× smaller than inversify (no
+`reflect-metadata`, no decorator-metadata arrays, tree-shakeable output).
+typed-inject is smaller still — it's a tiny functional injector with almost no
+runtime.
+
+### Cold start — *the one to care about for serverless*
+
+Median of 31 fresh Node processes: import the framework, build the graph, resolve
+the root. The delta subtracts a framework-free baseline (~24 ms of Node startup).
+
+| framework | Δ startup | Δ heap |
+| --- | ---: | ---: |
+| vanilla (hand-written) | +0.0 ms | +0.5 MB |
+| **diadem (compiled)** | **+4.0 ms** | +0.3 MB |
+| typed-inject | +8.1 ms | +0.3 MB |
+| tsyringe | +22.9 ms | +0.6 MB |
+| inversify | +55.8 ms | +1.3 MB |
+
+diadem compiled has the **lowest cold-start overhead of any real DI container** —
+~6× lower than tsyringe, ~14× lower than inversify, and it even edges typed-inject
+(whose nested injector chain costs more to build than straight-line code).
+
+### Cold build — build the whole container, in-process
 
 | framework | ops/sec | relative |
 | --- | ---: | ---: |
-| vanilla (hand-written) | 6,816,075 | 1.00× |
-| **diadem (compiled)** | **1,228,703** | **0.18×** |
-| typed-inject | 667,466 | 0.10× |
-| tsyringe | 375,348 | 0.06× |
-| diadem (manifest) | 82,535 | 0.01× |
-| inversify | 23,768 | 0.003× |
+| vanilla (hand-written) | 6,581,043 | 1.00× |
+| **diadem (compiled)** | **1,266,679** | 0.19× |
+| typed-inject | 667,106 | 0.10× |
+| tsyringe | 385,865 | 0.06× |
+| diadem (manifest) | 82,192 | 0.01× |
+| inversify | 24,132 | 0.003× |
 
-### Hot: resolve
+Among real DI containers, compiled mode is fastest to build: ~1.9× typed-inject,
+~3.3× tsyringe, ~52× inversify. diadem's **manifest** mode is slow to build (it
+interprets the manifest at runtime) — use manifest in dev/test, compiled in prod.
+
+### Hot resolve — *don't read too much into this*
 
 | framework | ops/sec | relative |
 | --- | ---: | ---: |
-| vanilla (hand-written) | 28,773,258 | 1.00× |
-| typed-inject | 26,583,453 | 0.92× |
-| **diadem (compiled)** | **23,501,152** | **0.82×** |
-| diadem (manifest) | 22,200,080 | 0.77× |
-| tsyringe | 10,383,615 | 0.36× |
-| inversify | 1,874,237 | 0.07× |
+| vanilla (hand-written) | 28,623,463 | 1.00× |
+| typed-inject | 27,254,693 | 0.95× |
+| diadem (compiled) | 25,886,143 | 0.90× |
+| diadem (manifest) | 23,463,229 | 0.82× |
+| tsyringe | 9,839,580 | 0.34× |
+| inversify | 1,871,105 | 0.07× |
+
+At ~25M ops/sec the measurement is dominated by call/loop overhead, not the
+lookup — in some runs hand-written wiring measures *slower* than a container,
+which is physically impossible and proves it's noise. The honest read: vanilla,
+typed-inject, and both diadem modes are **tied at the noise floor**; only the
+reflect-metadata containers (tsyringe ~2.6×, inversify ~14× slower) are
+distinguishable. Real apps resolve a handful of times at startup, not millions
+per second, so this metric rarely matters.
 
 ## Takeaways
 
-- On **cold construction**, diadem's compiled output is the fastest real DI
-  container here: ~1.8× typed-inject, ~3.3× tsyringe, ~52× inversify. Only
-  hand-written wiring is faster, which is the point — compiled mode is close to
-  hand-written.
-- On **hot resolve**, everything that avoids per-resolve reflection clusters near
-  the vanilla ceiling. typed-inject edges diadem slightly; both are far ahead of
-  the reflect-metadata containers (diadem ~2.3× tsyringe, ~12× inversify).
-- diadem's **manifest** mode is slow to build (it interprets the manifest at
-  runtime) but resolves as fast as compiled. Use manifest in dev/test, compiled
-  in production.
+- **Bundle size** and **cold start** are where diadem's build-time design pays
+  off, and they're the metrics that actually bite in production (frontend, edge,
+  serverless). diadem compiled wins cold start outright and beats the
+  reflect-metadata containers on size.
+- **Cold build** in-process: compiled mode is the fastest real container.
+- **Hot resolve** is a wash among the fast group — ignore the small differences.
 
 ## Caveats
 
-This is a microbenchmark on one machine with one graph shape. Real apps build
-their container once at startup, so cold cost is usually a one-time hit; hot
-resolve differences are small in absolute terms. Treat these as *shape*, not
-gospel, and run it on your own hardware.
+Microbenchmarks on one machine with one graph shape. Cold build/start are
+one-time costs in long-running apps; hot differences are tiny in absolute terms.
+Run it on your own hardware before quoting numbers.

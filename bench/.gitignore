@@ -2,3 +2,6 @@ node_modules/
 dist/
 src/diadem/generated/
 package-lock.json
+RESULTS.md
+BUNDLE.md
+COLDSTART.md

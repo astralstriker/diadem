@@ -6,7 +6,11 @@
   "scripts": {
     "generate": "node ../dist/cli.js build --cwd . --scan-dir src/diadem --out src/diadem/generated/manifest.ts && node ../dist/cli.js build --cwd . --scan-dir src/diadem --emit compiled --out src/diadem/generated/container.ts --target-env production",
     "compile": "tsc -p tsconfig.json",
-    "bench": "npm run generate && npm run compile && node dist/run.js"
+    "prep": "npm run generate && npm run compile",
+    "bench": "npm run prep && node dist/run.js",
+    "bundlesize": "npm run prep && node bundlesize.mjs",
+    "coldstart": "npm run prep && node coldstart.mjs",
+    "all": "npm run prep && node dist/run.js && node bundlesize.mjs && node coldstart.mjs"
   },
   "dependencies": {
     "@devcraft-ts/diadem": "file:..",
@@ -18,6 +22,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
     "typescript": "^5.7.2"
   }
 }
