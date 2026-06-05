@@ -13,6 +13,9 @@ import { dirname, join, relative, resolve } from 'node:path'
 import ts from 'typescript'
 import type { DiademConfig } from './config'
 
+/** The published package name that generated files import from. */
+const PACKAGE_NAME = '@devcraft-ts/diadem'
+
 type Lifecycle =
   | 'dependency'
   | 'singleton'
@@ -42,12 +45,19 @@ interface ResolvedDependency extends RawDependency {
   external?: boolean
 }
 
+/** Where a token (abstract class) can be imported from. */
+type TokenModule =
+  | { kind: 'file'; fullPath: string }
+  | { kind: 'bare'; specifier: string }
+
 interface ServiceInfo {
   className: string
   lifecycle: Lifecycle
   environment?: string
   token?: string
   tokenExported: boolean
+  /** Resolved import source of the token, for the typed accessor surface. */
+  tokenModule?: TokenModule
   fullPath: string
   filePath: string
   exported: boolean
@@ -196,10 +206,31 @@ function analyzeFile(fullPath: string, relPath: string): ServiceInfo[] {
     /* setParentNodes */ true
   )
 
+  // Where each name in scope comes from — for resolving token import sources.
+  const tokenSources = new Map<string, TokenModule>()
+  const fileDir = dirname(fullPath)
   const exportedClasses = new Set<string>()
+
   ts.forEachChild(source, function collect(node) {
+    // import { A, B } from '...'
+    if (
+      ts.isImportDeclaration(node) &&
+      node.importClause?.namedBindings &&
+      ts.isNamedImports(node.importClause.namedBindings) &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      const specifier = node.moduleSpecifier.text
+      const module: TokenModule = specifier.startsWith('.')
+        ? { kind: 'file', fullPath: resolve(fileDir, specifier) }
+        : { kind: 'bare', specifier }
+      for (const element of node.importClause.namedBindings.elements) {
+        tokenSources.set(element.name.text, module)
+      }
+    }
+    // Locally declared, exported abstract classes can serve as tokens.
     if (ts.isClassDeclaration(node) && node.name && isExported(node)) {
       exportedClasses.add(node.name.text)
+      tokenSources.set(node.name.text, { kind: 'file', fullPath })
     }
     ts.forEachChild(node, collect)
   })
@@ -207,7 +238,7 @@ function analyzeFile(fullPath: string, relPath: string): ServiceInfo[] {
   const services: ServiceInfo[] = []
   ts.forEachChild(source, function visit(node) {
     if (ts.isClassDeclaration(node)) {
-      const info = analyzeClass(node, fullPath, relPath, exportedClasses)
+      const info = analyzeClass(node, fullPath, relPath, exportedClasses, tokenSources)
       if (info) {
         services.push(info)
       }
@@ -222,7 +253,8 @@ function analyzeClass(
   node: ts.ClassDeclaration,
   fullPath: string,
   relPath: string,
-  exportedClasses: Set<string>
+  exportedClasses: Set<string>,
+  tokenSources: Map<string, TokenModule>
 ): ServiceInfo | null {
   if (!node.name) {
     return null
@@ -234,13 +266,15 @@ function analyzeClass(
   }
 
   const dependencies = analyzeConstructor(node)
+  const token = decoratorInfo.token
 
   return {
     className: node.name.text,
     lifecycle: decoratorInfo.lifecycle,
     environment: decoratorInfo.environment,
-    token: decoratorInfo.token,
-    tokenExported: !!decoratorInfo.token && exportedClasses.has(decoratorInfo.token),
+    token,
+    tokenExported: !!token && exportedClasses.has(token),
+    tokenModule: token ? tokenSources.get(token) : undefined,
     fullPath,
     filePath: relPath.replace(/\\/g, '/'),
     exported: isExported(node),
@@ -577,7 +611,7 @@ function renderManifest(
 import type {
   ImportedService,
   ServiceManifestEntry
-} from 'diadem'
+} from '${PACKAGE_NAME}'
 
 ${staticImports}
 
@@ -702,14 +736,41 @@ function renderCompiled(
     eager.set(s.className, EAGER_LIFECYCLES.has(s.lifecycle))
   }
 
-  // Group impl imports by computed path.
+  const classNames = new Set(services.map((s) => s.className))
+
+  // Group imports by computed path (impl classes + token classes).
   const importsByPath = new Map<string, Set<string>>()
-  for (const service of services) {
-    const path = importPathFor(outFile, service.fullPath)
+  const addImport = (path: string, name: string): void => {
     const names = importsByPath.get(path) ?? new Set<string>()
-    names.add(service.className)
+    names.add(name)
     importsByPath.set(path, names)
   }
+  for (const service of services) {
+    addImport(importPathFor(outFile, service.fullPath), service.className)
+  }
+
+  // Services exposed in the type-safe accessor surface: those with a uniquely
+  // named, importable token. (Duplicate or unlocatable tokens are skipped, as
+  // are tokens whose name collides with a different service class.)
+  const tokenCount = new Map<string, number>()
+  for (const s of services) {
+    if (s.token) {
+      tokenCount.set(s.token, (tokenCount.get(s.token) ?? 0) + 1)
+    }
+  }
+  const tokenPath = (m: TokenModule): string =>
+    m.kind === 'file' ? importPathFor(outFile, m.fullPath) : m.specifier
+  const typed = services.filter(
+    (s): s is ServiceInfo & { token: string; tokenModule: TokenModule } =>
+      !!s.token &&
+      !!s.tokenModule &&
+      tokenCount.get(s.token) === 1 &&
+      (s.token === s.className || !classNames.has(s.token))
+  )
+  for (const s of typed) {
+    addImport(tokenPath(s.tokenModule), s.token)
+  }
+
   const serviceImports = [...importsByPath.keys()]
     .sort()
     .map((path) => {
@@ -762,6 +823,36 @@ function renderCompiled(
     ? `environment: ${target}`
     : 'environment: all'
 
+  const accessorBlock =
+    typed.length === 0
+      ? ''
+      : `
+/**
+ * Type-safe accessor surface. Only registered tokens are present, each typed to
+ * its token — resolving an unregistered token is a compile error.
+ */
+export interface DiademServices {
+${typed.map((s) => `  ${s.token}: ${s.token}`).join('\n')}
+}
+
+export function createServices(): DiademServices & {
+  readonly container: DiademContainer
+  dispose: () => Promise<void>
+} {
+  const container = createContainer()
+  return {
+    container,
+    dispose: () => container.dispose(),
+${typed
+  .map(
+    (s) =>
+      `    get ${s.token}(): ${s.token} {\n      return container.resolve(${s.token})\n    }`
+  )
+  .join(',\n')}
+  }
+}
+`
+
   return `/**
  * Auto-generated by \`diadem build --emit=compiled\`. DO NOT EDIT MANUALLY.
  *
@@ -770,7 +861,7 @@ function renderCompiled(
 
 /* eslint-disable */
 
-import { DiademContainer, getDIMetadata } from 'diadem'
+import { DiademContainer, getDIMetadata } from '${PACKAGE_NAME}'
 
 ${serviceImports}
 
@@ -789,5 +880,5 @@ ${lines.join('\n')}
   c.setReady()
   return c
 }
-`
+${accessorBlock}`
 }

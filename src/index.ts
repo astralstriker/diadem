@@ -10,7 +10,7 @@
  *   configureManifest,
  *   singleton,
  *   factory
- * } from 'diadem'
+ * } from '@devcraft-ts/diadem'
  * import * as manifest from './generated/service-manifest'
  *
  * configureManifest(manifest)

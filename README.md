@@ -31,7 +31,7 @@ spin up child scopes for per-request isolation when you need it.
 ## Install
 
 ```bash
-npm install diadem
+npm install @devcraft-ts/diadem
 ```
 
 Requires TypeScript with `experimentalDecorators` enabled (legacy decorator
@@ -116,6 +116,24 @@ const greeter = container.resolve(IGreeter)
 This is the fastest path — wiring compiles down to the `new` calls you'd write
 by hand, and bundlers can tree-shake unused services from the output.
 
+**Type-safe access.** Compiled mode also emits a `createServices()` accessor
+whose surface contains *only the registered tokens*, each typed to its token —
+so resolving something that isn't wired is a **compile error**, not a runtime
+throw:
+
+```ts
+import { createServices } from './generated/container'
+
+const services = createServices()
+const greeting: string = services.IGreeter.greet('world') // ✓ correctly typed
+services.INope // ✗ tsc error: Property 'INope' does not exist on type 'DiademServices'
+```
+
+That's the compile-time guarantee of `typed-inject`/`@wessberg/di` — but reached
+through decorators + auto-discovery, with no custom TypeScript transformer.
+(Ambiguous or unlocatable tokens are omitted from the typed surface but still
+wired into `createContainer()`.)
+
 Trade-offs vs. the default manifest emit:
 - One environment is **baked in** per build (`--target-env`, default: all) — no
   runtime env branching.
@@ -141,7 +159,7 @@ Trade-offs vs. the default manifest emit:
 ## Quick start
 
 ```ts
-import { DiademContainer, configureManifest, singleton } from 'diadem'
+import { DiademContainer, configureManifest, singleton } from '@devcraft-ts/diadem'
 import * as manifest from './generated/service-manifest' // your build output
 
 abstract class ILogger {
@@ -189,7 +207,7 @@ Diadem is **silent by default** — it writes nothing unless you opt in. Registe
 logger to surface its diagnostics:
 
 ```ts
-import { setLogger, consoleLogger } from 'diadem'
+import { setLogger, consoleLogger } from '@devcraft-ts/diadem'
 
 setLogger(consoleLogger) // or your own pino/winston adapter implementing `Logger`
 setLogger(null) // back to silent
@@ -232,12 +250,12 @@ only resources a child registers itself are released with it. Transient
 
 ## API surface
 
-- `diadem` — `DiademContainer`, decorators (`singleton`/`factory`/`lazy`/
+- `@devcraft-ts/diadem` — `DiademContainer`, decorators (`singleton`/`factory`/`lazy`/
   `lazySingleton`), the manifest contract (`configureManifest`,
   `ServiceManifestModule`, `ServiceManifestEntry`, …), `Disposable`,
   auto-discovery utilities, and logging (`setLogger`, `consoleLogger`, `Logger`).
-- `diadem/setup` — environment-aware container factories, `validateAutoRegistration`,
-  and `logSetupInfo`.
+- `@devcraft-ts/diadem/setup` — environment-aware container factories,
+  `validateAutoRegistration`, and `logSetupInfo`.
 - `diadem build` — the manifest generator CLI (`bin`).
 
 ## How it compares
@@ -260,17 +278,22 @@ reflection → build-time wiring); `diadem` brings that shift to TypeScript.
 | typed-inject / brandi / ditox | no | no | no | compile (type-checked) |
 | **diadem** | **no** | yes | yes | **build (`diadem build`)** |
 
-For maximum runtime performance, `diadem build --emit=compiled` emits
-straight-line wiring (no runtime interpretation) — the same codegen approach as
-Dagger/Micronaut, which makes it the fastest DI path available in TS/npm.
+For maximum runtime performance **and** type safety, `diadem build
+--emit=compiled` emits straight-line wiring (no runtime interpretation — the same
+codegen approach as Dagger/Micronaut, the fastest DI path in TS/npm) plus a
+`createServices()` accessor that is **compile-time checked**: resolving an
+unregistered token is a `tsc` error. That matches `typed-inject`/`@wessberg/di`
+on safety, but without their cost — `@wessberg/di` needs a custom TypeScript
+transformer (and `ts-patch`/`ttypescript`, which broke at TS 5.0), whereas
+`diadem` emits plain `.ts` that any toolchain (tsc, esbuild, swc, vite, bun)
+compiles as-is.
 
-Trade-offs to know: `diadem` resolves tokens by identifier (use `--strict` to
-turn unresolved/ambiguous tokens into build errors — closer to Dagger's
-compile-time guarantees); a singleton's factory runs at registration, so
-**registration order matters** (the generator emits services in topological
-order for you; use `lazySingleton` to defer construction); and the generated
-manifest grows with the number of services. It uses legacy
-(`experimentalDecorators`) decorators.
+Trade-offs to know: build-time graph validation is name-based (`--strict` turns
+unresolved/ambiguous tokens into build errors) rather than fully type-driven; a
+singleton's factory runs at registration, so **registration order matters** (the
+generator emits services in topological order for you; use `lazySingleton` to
+defer construction); and the generated manifest grows with the number of
+services. It uses legacy (`experimentalDecorators`) decorators.
 
 ## Roadmap
 

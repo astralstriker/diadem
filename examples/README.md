@@ -18,7 +18,7 @@ In an actual project you don't hand-write the manifest — you generate it.
 
    ```ts
    // src/services/logger.ts
-   import { singleton } from 'diadem'
+   import { singleton } from '@devcraft-ts/diadem'
 
    export abstract class ILogger {
      abstract log(msg: string): void
@@ -42,7 +42,7 @@ In an actual project you don't hand-write the manifest — you generate it.
 3. Register it once at startup and resolve:
 
    ```ts
-   import { DiademContainer, configureManifest } from 'diadem'
+   import { DiademContainer, configureManifest } from '@devcraft-ts/diadem'
    import * as manifest from './generated/service-manifest'
 
    configureManifest(manifest)

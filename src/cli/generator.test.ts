@@ -203,5 +203,50 @@ describe('manifest generator', () => {
       expect(code).toContain('new ConsoleLogger()')
       expect(code).not.toContain('new Greeter(')
     })
+
+    it('emits a type-safe accessor surface (createServices)', () => {
+      writeGraph()
+      const result = generateManifest(
+        loadConfig(root, { emit: 'compiled', outFile: 'src/generated/container.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+
+      expect(code).toContain('export interface DiademServices')
+      expect(code).toContain('ILogger: ILogger')
+      expect(code).toContain('IGreeter: IGreeter')
+      expect(code).toContain('export function createServices()')
+      expect(code).toContain('return container.resolve(IGreeter)')
+      // Token classes are imported so they can be both type and resolution key.
+      expect(code).toMatch(
+        /import \{[\s\S]*ConsoleLogger[\s\S]*ILogger[\s\S]*\} from '\.\.\/logger'/
+      )
+    })
+
+    it('excludes ambiguous tokens from the typed surface but still wires them', () => {
+      write(
+        'src/a.ts',
+        `import { singleton } from 'diadem'
+         export abstract class IThing { abstract t(): void }
+         @singleton(IThing)
+         export class ThingA extends IThing { t() {} }`
+      )
+      write(
+        'src/b.ts',
+        `import { singleton } from 'diadem'
+         import { IThing } from './a'
+         @singleton(IThing)
+         export class ThingB extends IThing { t() {} }`
+      )
+      const result = generateManifest(
+        loadConfig(root, { emit: 'compiled', outFile: 'src/generated/container.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+
+      // Both are constructed/registered...
+      expect(code).toContain('new ThingA()')
+      expect(code).toContain('new ThingB()')
+      // ...but the ambiguous token is not exposed in the typed surface.
+      expect(code).not.toContain('IThing: IThing')
+    })
   })
 })

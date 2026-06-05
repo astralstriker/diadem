@@ -10,13 +10,13 @@
  *
  * Usage in a consuming app:
  * ```ts
- * import { configureManifest } from 'diadem'
+ * import { configureManifest } from '@devcraft-ts/diadem'
  * import * as manifest from './generated/service-manifest'
  *
  * configureManifest(manifest)
  * ```
  *
- * See `examples/service-manifest.example.ts` for a full generated manifest.
+ * See `examples/basic.ts` for a complete, runnable example.
  */
 
 import type { AbstractConstructor } from './types'
@@ -107,7 +107,7 @@ export async function loadManifest(): Promise<ServiceManifestModule> {
   throw new Error(
     'No Diadem service manifest configured. Generate a manifest for your ' +
       'project and register it at startup:\n\n' +
-      "  import { configureManifest } from 'diadem'\n" +
+      "  import { configureManifest } from '@devcraft-ts/diadem'\n" +
       "  import * as manifest from './generated/service-manifest'\n" +
       '  configureManifest(manifest)\n'
   )

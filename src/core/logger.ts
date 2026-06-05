@@ -7,7 +7,7 @@
  * pino/winston adapter):
  *
  * ```ts
- * import { setLogger, consoleLogger } from 'diadem'
+ * import { setLogger, consoleLogger } from '@devcraft-ts/diadem'
  * setLogger(consoleLogger)
  * ```
  */

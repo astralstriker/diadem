@@ -1,5 +1,5 @@
 {
-  "name": "diadem",
+  "name": "@devcraft-ts/diadem",
   "version": "0.1.0",
   "description": "Build-time, manifest-driven dependency injection for TypeScript. SSR-safe, framework-agnostic, zero runtime reflection.",
   "keywords": [
@@ -15,14 +15,14 @@
     "ssr"
   ],
   "license": "MIT",
-  "author": "Jai Sachdeva",
+  "author": "astralstriker",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/diadem.git"
+    "url": "git+https://github.com/astralstriker/diadem.git"
   },
-  "homepage": "https://github.com/OWNER/diadem#readme",
+  "homepage": "https://github.com/astralstriker/diadem#readme",
   "bugs": {
-    "url": "https://github.com/OWNER/diadem/issues"
+    "url": "https://github.com/astralstriker/diadem/issues"
   },
   "type": "module",
   "sideEffects": false,
