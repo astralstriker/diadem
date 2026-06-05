@@ -1,0 +1,23 @@
+{
+  "name": "diadem-bench",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Benchmarks for @devcraft-ts/diadem vs other TypeScript DI containers",
+  "scripts": {
+    "generate": "node ../dist/cli.js build --cwd . --scan-dir src/diadem --out src/diadem/generated/manifest.ts && node ../dist/cli.js build --cwd . --scan-dir src/diadem --emit compiled --out src/diadem/generated/container.ts --target-env production",
+    "compile": "tsc -p tsconfig.json",
+    "bench": "npm run generate && npm run compile && node dist/run.js"
+  },
+  "dependencies": {
+    "@devcraft-ts/diadem": "file:..",
+    "inversify": "^6.0.2",
+    "reflect-metadata": "^0.2.2",
+    "tinybench": "^2.9.0",
+    "tsyringe": "^4.8.0",
+    "typed-inject": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}
