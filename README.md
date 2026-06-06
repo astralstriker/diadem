@@ -367,11 +367,35 @@ services. It uses legacy (`experimentalDecorators`) decorators.
 
 ## Roadmap
 
-- Unused-service detection and other graph diagnostics (the interactive
-  `diadem graph` viewer already ships).
-- Offline mode for `diadem graph` (inline the layout library).
-- Type-driven `--strict` (verify the whole graph at the type level, not just by
-  token name).
+Planned in roughly this order (the `~>` items are the priority):
+
+**v0.2 — expressiveness**
+1. `~>` `diadem build --watch` — regenerate on source change (quick win).
+2. `~>` **Value/factory bindings** via a `@provides` provider class — bind tokens
+   to values/factories, not just classes (the one capability nearly every other
+   container has and diadem doesn't).
+3. `~>` **Async services** — `@asyncSingleton` + a generated `createContainerAsync`,
+   for dependencies that need awaited init (DB pools, secrets).
+4. `onInit` lifecycle hook (falls out of async work).
+
+**v0.3 — collections & scope**
+5. **Multi-binding** — `@singleton(IPlugin, { multi: true })` + `resolveAll` /
+   inject `IPlugin[]`, for plugin/handler architectures.
+6. True lazy in compiled mode (honor `lazySingleton` instead of eager).
+7. Managed **request scope** — `@scoped('request')` + `createRequestScope()`.
+
+**v0.4 — structure & ecosystem**
+8. Framework adapters (Express/Fastify per-request scope, a React provider).
+9. **Modules / encapsulation** (private providers, building on `@provides`).
+10. Named/qualified bindings (largely solvable today with distinct tokens).
+
+**Later / optional**
+11. Circular-dependency escape (lazy/`forwardRef`-style) — kept rejected by default.
+12. Property/setter injection.
+
+**Smaller items:** type-driven `--strict` (verify the graph at the type level,
+not just by token name), unused-service detection, and an offline mode for
+`diadem graph` (inline the layout library).
 
 ## License
 
