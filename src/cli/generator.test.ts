@@ -248,6 +248,46 @@ describe('manifest generator', () => {
       // ...but the ambiguous token is not exposed in the typed surface.
       expect(code).not.toContain('IThing: IThing')
     })
+
+    it('fails fast on a required external instead of passing undefined', () => {
+      write(
+        'src/svc.ts',
+        `import { singleton } from 'diadem'
+         export abstract class IService { abstract run(): void }
+         @singleton(IService)
+         export class Service extends IService {
+           constructor(private client: StripeSdk) { super() }
+           run() {}
+         }`
+      )
+      const result = generateManifest(
+        loadConfig(root, { emit: 'compiled', outFile: 'src/generated/c.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+      // Required, non-primitive external → a throwing helper, not silent undefined.
+      expect(code).toContain('requireExternal("Service", "client", "StripeSdk")')
+      expect(code).toContain('function requireExternal')
+      expect(code).not.toContain('new Service(undefined)')
+    })
+
+    it('passes undefined for an optional external (no throw)', () => {
+      write(
+        'src/svc.ts',
+        `import { singleton } from 'diadem'
+         export abstract class IService { abstract run(): void }
+         @singleton(IService)
+         export class Service extends IService {
+           constructor(private client?: StripeSdk) { super() }
+           run() {}
+         }`
+      )
+      const result = generateManifest(
+        loadConfig(root, { emit: 'compiled', outFile: 'src/generated/c.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+      expect(code).toContain('new Service(undefined)')
+      expect(code).not.toContain('requireExternal')
+    })
   })
 
   describe('graph visualizer', () => {

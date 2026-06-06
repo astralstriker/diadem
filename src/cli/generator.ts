@@ -794,6 +794,7 @@ function renderCompiled(
     })
     .join('\n')
 
+  let needsRequireExternal = false
   const argExpr = (service: ServiceInfo): string => {
     const arity = service.dependencies.reduce(
       (max, d) => Math.max(max, d.paramIndex + 1),
@@ -802,9 +803,22 @@ function renderCompiled(
     const args: string[] = Array.from({ length: arity }, () => 'undefined')
     for (const dep of service.resolvedDependencies) {
       if (dep.external) {
-        args[dep.paramIndex] = dep.isOptional
-          ? 'undefined'
-          : externalDefault(dep.typeName)
+        if (dep.isOptional) {
+          args[dep.paramIndex] = 'undefined'
+        } else {
+          // A required external the container can't construct. Use a primitive
+          // default if there is one; otherwise emit a fail-fast throw rather
+          // than silently passing `undefined` (which would crash later).
+          const prim = externalDefault(dep.typeName)
+          if (prim !== 'undefined') {
+            args[dep.paramIndex] = prim
+          } else {
+            needsRequireExternal = true
+            args[dep.paramIndex] =
+              `requireExternal(${JSON.stringify(service.className)}, ` +
+              `${JSON.stringify(dep.paramName)}, ${JSON.stringify(dep.typeName)})`
+          }
+        }
         continue
       }
       const impl = dep.implementingService
@@ -835,6 +849,18 @@ function renderCompiled(
   const targetComment = target
     ? `environment: ${target}`
     : 'environment: all'
+
+  const requireExternalHelper = needsRequireExternal
+    ? `
+function requireExternal(service: any, param: any, type: any): never {
+  throw new Error(
+    'diadem: ' + service + ' requires an external "' + type + '" (' + param + ') that the ' +
+    'container cannot construct. Make the parameter optional, give it a primitive default, ' +
+    'or wrap the dependency in a @singleton service.'
+  )
+}
+`
+    : ''
 
   const accessorBlock =
     typed.length === 0
@@ -885,7 +911,7 @@ function token(cls: any): any {
   }
   return meta.token
 }
-
+${requireExternalHelper}
 /** Build a fully-wired, ready container. */
 export function createContainer(): DiademContainer {
   const c = new DiademContainer()
