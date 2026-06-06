@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
- * `diadem` CLI — build-time manifest generation.
+ * `diadem` CLI — build-time manifest generation + graph visualization.
  *
  * Usage:
- *   diadem build [options]
+ *   diadem build [options]    Generate the manifest (or compiled wiring)
+ *   diadem graph [options]    Write an interactive HTML dependency-graph viewer
  *
  * Options:
  *   --scan-dir <dir>      Directory to scan (repeatable). Default: src
@@ -19,7 +20,7 @@
  */
 
 import { loadConfig, type DiademConfigInput } from './config'
-import { generateManifest } from './generator'
+import { generateGraph, generateManifest } from './generator'
 
 interface ParsedArgs {
   command: string
@@ -115,30 +116,52 @@ function parseArgs(argv: string[]): ParsedArgs {
 const HELP = `diadem — build-time DI manifest generator
 
 Usage:
-  diadem build [options]
+  diadem build [options]    Generate the service manifest (or compiled wiring)
+  diadem graph [options]    Write an interactive HTML dependency-graph viewer
 
 Options:
   --scan-dir <dir>     Directory to scan (repeatable). Default: src
-  --out <file>         Output manifest path. Default: src/generated/service-manifest.ts
+  --out <file>         Output path. Default: build → src/generated/service-manifest.ts,
+                       graph → diadem-graph.html
   --include <regex>    Filename include pattern (repeatable). Default: \\.ts$
   --exclude <regex>    Filename exclude pattern (repeatable).
   --env <name>         Environment to group by (repeatable). Default: development, production, test
-  --emit <mode>        Output mode: manifest (default) or compiled (straight-line wiring)
+  --emit <mode>        build: manifest (default) or compiled (straight-line wiring)
   --target-env <name>  For --emit=compiled, bake in a single environment
   --cwd <dir>          Project root. Default: current directory
-  --fail-on-cycle      Exit non-zero if a dependency cycle is detected
-  --strict             Exit non-zero on cycles, ambiguous tokens, or required
+  --fail-on-cycle      build: exit non-zero if a dependency cycle is detected
+  --strict             build: exit non-zero on cycles, ambiguous tokens, or required
                        dependencies with no implementing service
   -h, --help           Show this help
 
 A diadem.config.json in the project root is merged under CLI flags.
 `
 
+function runGraph(args: ParsedArgs): void {
+  const config = loadConfig(args.cwd, args.overrides)
+  const out = args.overrides.outFile ?? 'diadem-graph.html'
+  const result = generateGraph(config, out)
+  process.stdout.write(
+    `diadem: wrote graph (${result.serviceCount} services, ${result.edgeCount} edges` +
+      `${result.externalCount ? `, ${result.externalCount} external` : ''}) to ${result.outFile}\n`
+  )
+  if (result.cycles.length > 0) {
+    process.stderr.write(
+      `diadem: warning — dependency cycle(s) detected: ${result.cycles.join(', ')}\n`
+    )
+  }
+}
+
 function main(): void {
   const args = parseArgs(process.argv.slice(2))
 
   if (args.help) {
     process.stdout.write(HELP)
+    return
+  }
+
+  if (args.command === 'graph') {
+    runGraph(args)
     return
   }
 

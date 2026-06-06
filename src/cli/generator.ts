@@ -103,18 +103,31 @@ const PRIMITIVE_TYPES = new Set([
   'Set'
 ])
 
-/** Run the full generation pipeline and write the manifest file. */
-export function generateManifest(config: DiademConfig): GenerateResult {
+/**
+ * Scan the source and resolve the dependency graph (shared by the manifest
+ * generator and the graph visualizer). Returns services in topological order
+ * with their resolved dependencies, plus detected cycles and duplicate tokens.
+ */
+function analyzeGraph(config: DiademConfig): {
+  services: ServiceInfo[]
+  cycles: string[]
+  duplicateTokens: string[]
+} {
   const files = collectFiles(config)
   const services: ServiceInfo[] = []
   for (const file of files) {
     services.push(...analyzeFile(file.fullPath, file.relPath))
   }
-
   const { sorted, cycles, duplicateTokens } = resolveAndSort(services)
   sorted.forEach((service, index) => {
     service.registrationOrder = index
   })
+  return { services: sorted, cycles, duplicateTokens }
+}
+
+/** Run the full generation pipeline and write the manifest file. */
+export function generateManifest(config: DiademConfig): GenerateResult {
+  const { services: sorted, cycles, duplicateTokens } = analyzeGraph(config)
 
   const outFile = resolve(config.rootDir, config.outFile)
   const content =
@@ -881,4 +894,263 @@ ${lines.join('\n')}
   return c
 }
 ${accessorBlock}`
+}
+
+// --- Graph visualizer ------------------------------------------------------
+
+export interface GraphResult {
+  outFile: string
+  serviceCount: number
+  edgeCount: number
+  externalCount: number
+  cycles: string[]
+}
+
+interface CyElement {
+  data: Record<string, string | number>
+}
+
+interface GraphData {
+  elements: CyElement[]
+  stats: {
+    services: number
+    edges: number
+    externals: number
+    cycles: number
+  }
+  environments: string[]
+  cycles: string[]
+}
+
+/**
+ * Analyze the source and write a self-contained interactive HTML page that
+ * visualizes the dependency graph (nodes = services, edges = dependencies).
+ */
+export function generateGraph(
+  config: DiademConfig,
+  graphOut: string
+): GraphResult {
+  const { services, cycles } = analyzeGraph(config)
+  const cycleSet = new Set(cycles)
+  const nodes: CyElement[] = []
+  const edges: CyElement[] = []
+  const externals = new Set<string>()
+  const envs = new Set<string>()
+
+  for (const s of services) {
+    if (s.environment) {
+      envs.add(s.environment)
+    }
+    nodes.push({
+      data: {
+        id: s.className,
+        label: s.className,
+        lifecycle: s.lifecycle,
+        env: s.environment ?? '',
+        file: s.filePath,
+        token: s.token ?? '',
+        cycle: cycleSet.has(s.className) ? 1 : 0
+      }
+    })
+    for (const dep of s.resolvedDependencies) {
+      if (dep.implementingService) {
+        edges.push({
+          data: {
+            id: `${s.className}->${dep.implementingService}#${dep.paramIndex}`,
+            source: s.className,
+            target: dep.implementingService,
+            optional: dep.isOptional ? 1 : 0,
+            kind: 'internal'
+          }
+        })
+      } else if (dep.external) {
+        externals.add(dep.typeName)
+        edges.push({
+          data: {
+            id: `${s.className}->ext:${dep.typeName}#${dep.paramIndex}`,
+            source: s.className,
+            target: `ext:${dep.typeName}`,
+            optional: dep.isOptional ? 1 : 0,
+            kind: 'external'
+          }
+        })
+      }
+    }
+  }
+  for (const t of externals) {
+    nodes.push({
+      data: {
+        id: `ext:${t}`,
+        label: t,
+        lifecycle: 'external',
+        env: '',
+        file: '',
+        token: '',
+        cycle: 0
+      }
+    })
+  }
+
+  const data: GraphData = {
+    elements: [...nodes, ...edges],
+    stats: {
+      services: services.length,
+      edges: edges.length,
+      externals: externals.size,
+      cycles: cycles.length
+    },
+    environments: [...envs].sort(),
+    cycles
+  }
+
+  const outFile = resolve(config.rootDir, graphOut)
+  mkdirSync(dirname(outFile), { recursive: true })
+  writeFileSync(outFile, renderGraphHtml(data), 'utf8')
+
+  return {
+    outFile,
+    serviceCount: services.length,
+    edgeCount: edges.length,
+    externalCount: externals.size,
+    cycles
+  }
+}
+
+function renderGraphHtml(data: GraphData): string {
+  // Escape </ so a class name can never break out of the <script> tag.
+  const json = JSON.stringify(data).replace(/</g, '\\u003c')
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>diadem · dependency graph</title>
+<script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.5 ui-sans-serif, system-ui, sans-serif; color: #111; }
+  header { padding: 10px 16px; border-bottom: 1px solid #e5e7eb; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 700; }
+  header .stats { color: #6b7280; }
+  header .cycle-warn { color: #b91c1c; font-weight: 600; }
+  select { font: inherit; padding: 2px 6px; }
+  main { display: flex; height: calc(100vh - 49px); }
+  #cy { flex: 1; height: 100%; background: #fafafa; }
+  aside { width: 300px; border-left: 1px solid #e5e7eb; padding: 14px 16px; overflow: auto; }
+  aside h2 { font-size: 14px; margin: 0 0 8px; }
+  aside .meta { color: #6b7280; margin-bottom: 10px; word-break: break-all; }
+  aside ul { margin: 4px 0 12px; padding-left: 18px; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; color: #374151; }
+  .legend span::before { content: ''; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+  .lg-singleton::before { background: #3b82f6; }
+  .lg-lazy::before { background: #10b981; }
+  .lg-lazysingleton::before { background: #8b5cf6; }
+  .lg-external::before { background: #9ca3af; }
+</style>
+</head>
+<body>
+<header>
+  <h1>diadem</h1>
+  <span class="stats" id="stats"></span>
+  <span class="cycle-warn" id="cyclewarn"></span>
+  <label>env: <select id="env"></select></label>
+  <span class="legend">
+    <span class="lg-singleton">singleton</span>
+    <span class="lg-lazysingleton">lazySingleton</span>
+    <span class="lg-lazy">lazy / factory</span>
+    <span class="lg-external">external</span>
+  </span>
+</header>
+<main>
+  <div id="cy"></div>
+  <aside id="panel"></aside>
+</main>
+<script>
+var DATA = ${json};
+var DEFAULT_PANEL = '<h2>Dependency graph</h2><div class="meta">Click a node to inspect it. Arrows point from a service to what it depends on. Red border = part of a cycle.</div>';
+
+var s = DATA.stats;
+document.getElementById('stats').textContent =
+  s.services + ' services · ' + s.edges + ' edges · ' + s.externals + ' external';
+if (s.cycles > 0) {
+  document.getElementById('cyclewarn').textContent = '⚠ ' + s.cycles + ' cycle(s): ' + DATA.cycles.join(', ');
+}
+
+var sel = document.getElementById('env');
+var optAll = document.createElement('option');
+optAll.value = 'all'; optAll.textContent = 'all';
+sel.appendChild(optAll);
+DATA.environments.forEach(function (e) {
+  var o = document.createElement('option');
+  o.value = e; o.textContent = e;
+  sel.appendChild(o);
+});
+
+var cy = cytoscape({
+  container: document.getElementById('cy'),
+  elements: DATA.elements,
+  style: [
+    { selector: 'node', style: { 'label': 'data(label)', 'font-size': 10, 'text-valign': 'center', 'text-halign': 'center', 'color': '#fff', 'width': 'label', 'height': 22, 'padding': '8px', 'shape': 'round-rectangle', 'background-color': '#3b82f6', 'border-width': 1, 'border-color': '#1e3a8a' } },
+    { selector: 'node[lifecycle="lazySingleton"]', style: { 'background-color': '#8b5cf6', 'border-color': '#5b21b6' } },
+    { selector: 'node[lifecycle="lazy"]', style: { 'background-color': '#10b981', 'border-color': '#065f46' } },
+    { selector: 'node[lifecycle="factory"]', style: { 'background-color': '#10b981', 'border-color': '#065f46' } },
+    { selector: 'node[lifecycle="external"]', style: { 'background-color': '#9ca3af', 'border-color': '#4b5563', 'border-style': 'dashed', 'color': '#111' } },
+    { selector: 'node[cycle=1]', style: { 'border-color': '#dc2626', 'border-width': 3 } },
+    { selector: 'edge', style: { 'width': 1.5, 'line-color': '#cbd5e1', 'target-arrow-color': '#cbd5e1', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'arrow-scale': 0.9 } },
+    { selector: 'edge[optional=1]', style: { 'line-style': 'dashed' } },
+    { selector: 'edge[kind="external"]', style: { 'line-color': '#e5e7eb', 'line-style': 'dashed', 'target-arrow-color': '#e5e7eb' } },
+    { selector: '.faded', style: { 'opacity': 0.12 } }
+  ],
+  layout: { name: 'dagre', rankDir: 'TB', nodeSep: 22, rankSep: 55 }
+});
+
+var panel = document.getElementById('panel');
+panel.innerHTML = DEFAULT_PANEL;
+
+function list(arr) {
+  if (!arr.length) return '<ul><li style="color:#9ca3af">none</li></ul>';
+  return '<ul>' + arr.map(function (x) { return '<li>' + x + '</li>'; }).join('') + '</ul>';
+}
+
+cy.on('tap', 'node', function (evt) {
+  var n = evt.target;
+  var d = n.data();
+  var deps = n.outgoers('node').map(function (x) { return x.data('label'); });
+  var dependents = n.incomers('node').map(function (x) { return x.data('label'); });
+  var html = '<h2>' + d.label + '</h2>';
+  html += '<div class="meta">';
+  html += 'lifecycle: <b>' + d.lifecycle + '</b><br>';
+  if (d.token) html += 'token: ' + d.token + '<br>';
+  if (d.env) html += 'env: ' + d.env + '<br>';
+  if (d.file) html += 'file: ' + d.file;
+  html += '</div>';
+  html += '<b>depends on</b>' + list(deps);
+  html += '<b>used by</b>' + list(dependents);
+  panel.innerHTML = html;
+  cy.elements().addClass('faded');
+  n.closedNeighborhood().removeClass('faded');
+});
+
+cy.on('tap', function (e) {
+  if (e.target === cy) {
+    cy.elements().removeClass('faded');
+    panel.innerHTML = DEFAULT_PANEL;
+  }
+});
+
+sel.addEventListener('change', function () {
+  var v = sel.value;
+  cy.nodes().forEach(function (n) {
+    var env = n.data('env');
+    var hide = v !== 'all' && env && env !== v;
+    n.style('display', hide ? 'none' : 'element');
+  });
+  cy.layout({ name: 'dagre', rankDir: 'TB', nodeSep: 22, rankSep: 55 }).run();
+});
+</script>
+</body>
+</html>
+`
 }

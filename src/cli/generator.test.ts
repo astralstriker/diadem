@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { loadConfig } from './config'
-import { generateManifest } from './generator'
+import { generateGraph, generateManifest } from './generator'
 
 let root: string
 
@@ -247,6 +247,60 @@ describe('manifest generator', () => {
       expect(code).toContain('new ThingB()')
       // ...but the ambiguous token is not exposed in the typed surface.
       expect(code).not.toContain('IThing: IThing')
+    })
+  })
+
+  describe('graph visualizer', () => {
+    it('writes an interactive HTML graph with nodes, edges, and externals', () => {
+      write(
+        'src/logger.ts',
+        `import { singleton } from 'diadem'
+         export abstract class ILogger { abstract log(m: string): void }
+         @singleton(ILogger) export class ConsoleLogger extends ILogger { log(m: string) {} }`
+      )
+      write(
+        'src/greeter.ts',
+        `import { singleton } from 'diadem'
+         import { ILogger } from './logger'
+         export abstract class IGreeter { abstract greet(): string }
+         @singleton(IGreeter) export class Greeter extends IGreeter {
+           constructor(private l: ILogger, private cfg: IExternalConfig) { super() }
+           greet() { return 'hi' }
+         }`
+      )
+      const result = generateGraph(loadConfig(root), 'graph.html')
+      expect(result.serviceCount).toBe(2)
+      expect(result.edgeCount).toBe(2) // Greeter→ILogger, Greeter→external
+      expect(result.externalCount).toBe(1)
+
+      const html = readFileSync(result.outFile, 'utf8')
+      expect(html).toContain('<!doctype html>')
+      expect(html).toContain('cytoscape')
+      expect(html).toContain('"ConsoleLogger"')
+      expect(html).toContain('"ext:IExternalConfig"')
+      // edge from Greeter to its ILogger implementation
+      expect(html).toContain('"source":"Greeter","target":"ConsoleLogger"')
+    })
+
+    it('marks cycle members in the graph data', () => {
+      write(
+        'src/a.ts',
+        `import { singleton } from 'diadem'
+         import { IB } from './b'
+         export abstract class IA { abstract a(): void }
+         @singleton(IA) export class A extends IA { constructor(private b: IB) { super() } a() {} }`
+      )
+      write(
+        'src/b.ts',
+        `import { singleton } from 'diadem'
+         import { IA } from './a'
+         export abstract class IB { abstract b(): void }
+         @singleton(IB) export class B extends IB { constructor(private a: IA) { super() } b() {} }`
+      )
+      const result = generateGraph(loadConfig(root), 'graph.html')
+      expect(result.cycles.length).toBeGreaterThan(0)
+      // at least one node flagged cycle:1 in the embedded data
+      expect(readFileSync(result.outFile, 'utf8')).toContain('"cycle":1')
     })
   })
 })

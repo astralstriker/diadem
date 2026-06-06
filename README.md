@@ -141,6 +141,22 @@ Trade-offs vs. the default manifest emit:
 - No runtime mock/override registration — use the manifest emit for dev/test if
   you rely on that dynamism.
 
+## Visualize the dependency graph
+
+`diadem graph` writes a self-contained, interactive HTML page of your dependency
+graph — nodes are services (colored by lifecycle), arrows point to what they
+depend on, cycles are flagged in red, and clicking a node shows its
+dependencies and dependents. It reads the same source as `diadem build`, so no
+running app or manifest is required.
+
+```bash
+npx diadem graph                 # writes diadem-graph.html
+npx diadem graph --out docs/di.html --target-env production
+```
+
+Open the file in a browser. (It loads its graph layout library from a CDN, so
+view it online.)
+
 ## Concepts
 
 | Concept | What it is |
@@ -297,9 +313,11 @@ services. It uses legacy (`experimentalDecorators`) decorators.
 
 ## Roadmap
 
-- Richer dependency-graph diagnostics from the generator (visualization, unused
-  service detection).
-- A `--check` dry-run mode and a benchmark harness.
+- Unused-service detection and other graph diagnostics (the interactive
+  `diadem graph` viewer already ships).
+- Offline mode for `diadem graph` (inline the layout library).
+- Type-driven `--strict` (verify the whole graph at the type level, not just by
+  token name).
 
 ## License
 
