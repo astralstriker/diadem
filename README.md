@@ -397,6 +397,16 @@ Planned in roughly this order (the `~>` items are the priority):
 not just by token name), unused-service detection, and an offline mode for
 `diadem graph` (inline the layout library).
 
+**Speculative / opt-in**
+- An optional `@devcraft-ts/diadem-transformer` — a compile-time TS transformer
+  that ports "reified generics" over (typia / `@wessberg/di` style): write
+  `container.resolve<IFoo>()` with plain **interface** tokens (no abstract-class
+  token). Kept out of the core because it requires `ts-patch`/`ttypescript`,
+  which would compromise diadem's no-transformer, toolchain-agnostic design.
+- Generic/parameterized services (`Repository<User>` vs `Repository<Order>`) —
+  resolvable distinctly via build-time type-arg analysis. Niche, but something
+  only a build-time tool could reasonably do in TS.
+
 ## License
 
 [MIT](LICENSE) © Jai Sachdeva
