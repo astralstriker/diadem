@@ -150,12 +150,15 @@ dependencies and dependents. It reads the same source as `diadem build`, so no
 running app or manifest is required.
 
 ```bash
-npx diadem graph                 # writes diadem-graph.html
+npx diadem graph --serve         # opens http://localhost:4321 (re-analyzes on refresh)
+npx diadem graph                 # or write a file: diadem-graph.html
 npx diadem graph --out docs/di.html --target-env production
 ```
 
-Open the file in a browser. (It loads its graph layout library from a CDN, so
-view it online.)
+`--serve` runs a tiny local server (like a studio) and re-renders on every
+refresh, so you can edit a service, reload, and see the change. Plain `diadem
+graph` writes a self-contained HTML file instead. Either way it loads its graph
+layout library from a CDN, so view it online.
 
 ## Concepts
 

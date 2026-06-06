@@ -922,14 +922,21 @@ interface GraphData {
   cycles: string[]
 }
 
+/** A rendered graph: the HTML plus summary counts (no file written). */
+export interface RenderedGraph {
+  html: string
+  serviceCount: number
+  edgeCount: number
+  externalCount: number
+  cycles: string[]
+}
+
 /**
- * Analyze the source and write a self-contained interactive HTML page that
- * visualizes the dependency graph (nodes = services, edges = dependencies).
+ * Analyze the source and produce the interactive HTML graph as a string.
+ * Used by both `generateGraph` (writes a file) and the `--serve` mode (which
+ * re-renders on each request).
  */
-export function generateGraph(
-  config: DiademConfig,
-  graphOut: string
-): GraphResult {
+export function renderGraph(config: DiademConfig): RenderedGraph {
   const { services, cycles } = analyzeGraph(config)
   const cycleSet = new Set(cycles)
   const nodes: CyElement[] = []
@@ -1003,16 +1010,32 @@ export function generateGraph(
     cycles
   }
 
-  const outFile = resolve(config.rootDir, graphOut)
-  mkdirSync(dirname(outFile), { recursive: true })
-  writeFileSync(outFile, renderGraphHtml(data), 'utf8')
-
   return {
-    outFile,
+    html: renderGraphHtml(data),
     serviceCount: services.length,
     edgeCount: edges.length,
     externalCount: externals.size,
     cycles
+  }
+}
+
+/**
+ * Analyze the source and write a self-contained interactive HTML graph file.
+ */
+export function generateGraph(
+  config: DiademConfig,
+  graphOut: string
+): GraphResult {
+  const rendered = renderGraph(config)
+  const outFile = resolve(config.rootDir, graphOut)
+  mkdirSync(dirname(outFile), { recursive: true })
+  writeFileSync(outFile, rendered.html, 'utf8')
+  return {
+    outFile,
+    serviceCount: rendered.serviceCount,
+    edgeCount: rendered.edgeCount,
+    externalCount: rendered.externalCount,
+    cycles: rendered.cycles
   }
 }
 

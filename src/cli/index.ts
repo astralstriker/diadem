@@ -19,14 +19,18 @@
  * Config file: a `diadem.config.json` in the project root is merged under CLI flags.
  */
 
+import { spawn } from 'node:child_process'
+import { createServer } from 'node:http'
 import { loadConfig, type DiademConfigInput } from './config'
-import { generateGraph, generateManifest } from './generator'
+import { generateGraph, generateManifest, renderGraph } from './generator'
 
 interface ParsedArgs {
   command: string
   cwd: string
   failOnCycle: boolean
   strict: boolean
+  serve: boolean
+  port?: number
   help: boolean
   overrides: DiademConfigInput
 }
@@ -37,6 +41,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     cwd: process.cwd(),
     failOnCycle: false,
     strict: false,
+    serve: false,
     help: false,
     overrides: {}
   }
@@ -52,8 +57,15 @@ function parseArgs(argv: string[]): ParsedArgs {
   }
 
   for (; i < argv.length; i++) {
-    const arg = argv[i]
+    const raw = argv[i]
+    // Accept both `--flag value` and `--flag=value`.
+    const eq = raw.startsWith('--') ? raw.indexOf('=') : -1
+    const arg = eq === -1 ? raw : raw.slice(0, eq)
+    const inline = eq === -1 ? undefined : raw.slice(eq + 1)
     const next = (): string => {
+      if (inline !== undefined) {
+        return inline
+      }
       const value = argv[++i]
       if (value === undefined) {
         throw new Error(`Missing value for ${arg}`)
@@ -89,6 +101,12 @@ function parseArgs(argv: string[]): ParsedArgs {
       }
       case '--target-env':
         parsed.overrides.targetEnv = next()
+        break
+      case '--port':
+        parsed.port = Number(next())
+        break
+      case '--serve':
+        parsed.serve = true
         break
       case '--fail-on-cycle':
         parsed.failOnCycle = true
@@ -128,6 +146,8 @@ Options:
   --env <name>         Environment to group by (repeatable). Default: development, production, test
   --emit <mode>        build: manifest (default) or compiled (straight-line wiring)
   --target-env <name>  For --emit=compiled, bake in a single environment
+  --serve              graph: serve on a local port instead of writing a file
+  --port <n>           graph: port for --serve (default 4321)
   --cwd <dir>          Project root. Default: current directory
   --fail-on-cycle      build: exit non-zero if a dependency cycle is detected
   --strict             build: exit non-zero on cycles, ambiguous tokens, or required
@@ -137,7 +157,70 @@ Options:
 A diadem.config.json in the project root is merged under CLI flags.
 `
 
+function openBrowser(url: string): void {
+  const cmd =
+    process.platform === 'darwin'
+      ? ['open', [url]]
+      : process.platform === 'win32'
+        ? ['cmd', ['/c', 'start', '', url]]
+        : ['xdg-open', [url]]
+  try {
+    spawn(cmd[0] as string, cmd[1] as string[], {
+      stdio: 'ignore',
+      detached: true
+    }).unref()
+  } catch {
+    /* opening the browser is best-effort */
+  }
+}
+
+function serveGraph(args: ParsedArgs): void {
+  const config = loadConfig(args.cwd, args.overrides)
+  const port = args.port ?? 4321
+
+  const server = createServer((req, res) => {
+    if (req.url && req.url !== '/' && req.url !== '/index.html') {
+      res.writeHead(404).end('not found')
+      return
+    }
+    try {
+      // Re-analyze on every request, so editing a service and refreshing the
+      // page shows the updated graph (no restart needed).
+      const { html } = renderGraph(config)
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(html)
+    } catch (error) {
+      res.writeHead(500, { 'content-type': 'text/plain' })
+      res.end(error instanceof Error ? error.message : String(error))
+    }
+  })
+
+  server.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'EADDRINUSE') {
+      process.stderr.write(
+        `diadem: port ${port} is in use — try --port <n>\n`
+      )
+    } else {
+      process.stderr.write(`diadem: ${error.message}\n`)
+    }
+    process.exit(1)
+  })
+
+  server.listen(port, () => {
+    const url = `http://localhost:${port}`
+    process.stdout.write(
+      `diadem: serving dependency graph at ${url}\n` +
+        `diadem: re-analyzes on each refresh · Ctrl+C to stop\n`
+    )
+    openBrowser(url)
+  })
+}
+
 function runGraph(args: ParsedArgs): void {
+  if (args.serve) {
+    serveGraph(args)
+    return
+  }
   const config = loadConfig(args.cwd, args.overrides)
   const out = args.overrides.outFile ?? 'diadem-graph.html'
   const result = generateGraph(config, out)
