@@ -53,6 +53,7 @@ Run the generator after writing or changing decorated services:
 
 ```bash
 npx diadem build
+npx diadem build --watch   # rebuild automatically as you edit
 ```
 
 It scans your source, finds DI-decorated classes via the TypeScript AST,
@@ -370,7 +371,7 @@ services. It uses legacy (`experimentalDecorators`) decorators.
 Planned in roughly this order (the `~>` items are the priority):
 
 **v0.2 — expressiveness**
-1. `~>` `diadem build --watch` — regenerate on source change (quick win).
+1. ✅ `diadem build --watch` — regenerate on source change *(shipped)*.
 2. `~>` **Value/factory bindings** via a `@provides` provider class — bind tokens
    to values/factories, not just classes (the one capability nearly every other
    container has and diadem doesn't).

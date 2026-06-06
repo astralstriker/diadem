@@ -20,8 +20,14 @@
  */
 
 import { spawn } from 'node:child_process'
+import { watch } from 'node:fs'
 import { createServer } from 'node:http'
-import { loadConfig, type DiademConfigInput } from './config'
+import { resolve } from 'node:path'
+import {
+  loadConfig,
+  type DiademConfig,
+  type DiademConfigInput
+} from './config'
 import { generateGraph, generateManifest, renderGraph } from './generator'
 
 interface ParsedArgs {
@@ -30,6 +36,7 @@ interface ParsedArgs {
   failOnCycle: boolean
   strict: boolean
   serve: boolean
+  watch: boolean
   port?: number
   help: boolean
   overrides: DiademConfigInput
@@ -42,6 +49,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     failOnCycle: false,
     strict: false,
     serve: false,
+    watch: false,
     help: false,
     overrides: {}
   }
@@ -108,6 +116,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       case '--serve':
         parsed.serve = true
         break
+      case '--watch':
+        parsed.watch = true
+        break
       case '--fail-on-cycle':
         parsed.failOnCycle = true
         break
@@ -146,6 +157,7 @@ Options:
   --env <name>         Environment to group by (repeatable). Default: development, production, test
   --emit <mode>        build: manifest (default) or compiled (straight-line wiring)
   --target-env <name>  For --emit=compiled, bake in a single environment
+  --watch              build: rebuild when scanned source changes
   --serve              graph: serve on a local port instead of writing a file
   --port <n>           graph: port for --serve (default 4321)
   --cwd <dir>          Project root. Default: current directory
@@ -235,6 +247,109 @@ function runGraph(args: ParsedArgs): void {
   }
 }
 
+/** Run one build, printing results. Returns true if it was a strict/cycle failure. */
+function buildOnce(config: DiademConfig, args: ParsedArgs): boolean {
+  const result = generateManifest(config)
+
+  process.stdout.write(
+    `diadem: wrote ${result.serviceCount} services to ${result.outFile}\n`
+  )
+  if (result.externalDependencies > 0) {
+    process.stdout.write(
+      `diadem: ${result.externalDependencies} external dependencies (not container-managed)\n`
+    )
+  }
+
+  for (const token of result.duplicateTokens) {
+    process.stderr.write(
+      `diadem: warning — token ${token} is declared by more than one service (ambiguous)\n`
+    )
+  }
+  if (result.cycles.length > 0) {
+    process.stderr.write(
+      `diadem: warning — dependency cycle(s) detected: ${result.cycles.join(', ')}\n`
+    )
+  }
+  if (args.strict) {
+    for (const dep of result.unresolved) {
+      process.stderr.write(
+        `diadem: error — ${dep.service} requires ${dep.typeName} (${dep.paramName}), but no service implements it\n`
+      )
+    }
+  }
+
+  const cycleViolation =
+    result.cycles.length > 0 && (args.strict || args.failOnCycle)
+  const strictViolation =
+    args.strict &&
+    (result.unresolved.length > 0 || result.duplicateTokens.length > 0)
+  return cycleViolation || strictViolation
+}
+
+const activeWatchers: ReturnType<typeof watch>[] = []
+
+function startWatch(config: DiademConfig, args: ParsedArgs): void {
+  const outFile = resolve(config.rootDir, config.outFile)
+  let timer: NodeJS.Timeout | undefined
+
+  const rebuild = (): void => {
+    timer = undefined
+    try {
+      buildOnce(config, args)
+    } catch (error) {
+      process.stderr.write(
+        `diadem: ${error instanceof Error ? error.message : String(error)}\n`
+      )
+    }
+  }
+
+  const onChange = (filename: string | null, dirAbs: string): void => {
+    if (filename) {
+      if (!filename.endsWith('.ts')) {
+        return
+      }
+      if (resolve(dirAbs, filename) === outFile) {
+        return // ignore our own generated output
+      }
+    }
+    if (timer) {
+      clearTimeout(timer)
+    }
+    timer = setTimeout(rebuild, 120) // debounce bursts of save events
+  }
+
+  for (const dir of config.scanDirs) {
+    const abs = resolve(config.rootDir, dir)
+    try {
+      activeWatchers.push(
+        watch(abs, { recursive: true }, (_event, filename) => {
+          onChange(filename ? filename.toString() : null, abs)
+        })
+      )
+    } catch (error) {
+      process.stderr.write(
+        `diadem: cannot watch ${dir}: ${error instanceof Error ? error.message : String(error)}\n`
+      )
+    }
+  }
+
+  process.stdout.write(
+    `diadem: watching ${config.scanDirs.join(', ')} for changes · Ctrl+C to stop\n`
+  )
+}
+
+function runBuild(args: ParsedArgs): void {
+  const config = loadConfig(args.cwd, args.overrides)
+  const failed = buildOnce(config, args)
+  if (args.watch) {
+    startWatch(config, args)
+    return
+  }
+  if (failed) {
+    process.exit(1)
+  }
+}
+
 function main(): void {
   const args = parseArgs(process.argv.slice(2))
 
@@ -253,47 +368,7 @@ function main(): void {
     process.exit(1)
   }
 
-  const config = loadConfig(args.cwd, args.overrides)
-  const result = generateManifest(config)
-
-  process.stdout.write(
-    `diadem: wrote ${result.serviceCount} services to ${result.outFile}\n`
-  )
-  if (result.externalDependencies > 0) {
-    process.stdout.write(
-      `diadem: ${result.externalDependencies} external dependencies (not container-managed)\n`
-    )
-  }
-
-  // Always surface ambiguity/cycles as warnings.
-  for (const token of result.duplicateTokens) {
-    process.stderr.write(
-      `diadem: warning — token ${token} is declared by more than one service (ambiguous)\n`
-    )
-  }
-  if (result.cycles.length > 0) {
-    process.stderr.write(
-      `diadem: warning — dependency cycle(s) detected: ${result.cycles.join(', ')}\n`
-    )
-  }
-
-  // Decide whether to fail the build.
-  const cycleViolation = result.cycles.length > 0 && (args.strict || args.failOnCycle)
-  const strictViolation =
-    args.strict &&
-    (result.unresolved.length > 0 || result.duplicateTokens.length > 0)
-
-  if (args.strict) {
-    for (const dep of result.unresolved) {
-      process.stderr.write(
-        `diadem: error — ${dep.service} requires ${dep.typeName} (${dep.paramName}), but no service implements it\n`
-      )
-    }
-  }
-
-  if (cycleViolation || strictViolation) {
-    process.exit(1)
-  }
+  runBuild(args)
 }
 
 try {
