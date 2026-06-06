@@ -270,7 +270,7 @@ describe('manifest generator', () => {
       expect(code).not.toContain('new Service(undefined)')
     })
 
-    it('passes undefined for an optional external (no throw)', () => {
+    it('omits a trailing optional external (no undefined arg, no throw)', () => {
       write(
         'src/svc.ts',
         `import { singleton } from 'diadem'
@@ -285,7 +285,8 @@ describe('manifest generator', () => {
         loadConfig(root, { emit: 'compiled', outFile: 'src/generated/c.ts' })
       )
       const code = readFileSync(result.outFile, 'utf8')
-      expect(code).toContain('new Service(undefined)')
+      expect(code).toContain('new Service()')
+      expect(code).not.toContain('new Service(undefined)')
       expect(code).not.toContain('requireExternal')
     })
   })

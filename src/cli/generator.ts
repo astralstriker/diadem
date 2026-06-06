@@ -830,6 +830,11 @@ function renderCompiled(
         args[dep.paramIndex] = 'undefined'
       }
     }
+    // Trailing `undefined` args (optional deps with nothing to inject) read like
+    // leftovers — drop them; JS fills the missing params with undefined anyway.
+    while (args.length > 0 && args[args.length - 1] === 'undefined') {
+      args.pop()
+    }
     return args.join(', ')
   }
 
