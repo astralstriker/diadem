@@ -6,3 +6,7 @@ coverage/
 .idea/
 .vscode/
 *.tsbuildinfo
+
+# Generated example artifacts (run the tools to (re)create them)
+examples/**/generated/
+examples/**/*.html
