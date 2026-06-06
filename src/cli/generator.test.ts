@@ -176,10 +176,10 @@ describe('manifest generator', () => {
       )
       const code = readFileSync(result.outFile, 'utf8')
 
-      expect(code).toContain('export function createContainer()')
+      expect(code).toContain('export function createContainer(')
       // Dependency constructed first, then referenced directly (no lookup).
-      expect(code).toContain('const _ConsoleLogger = new ConsoleLogger()')
-      expect(code).toContain('const _Greeter = new Greeter(_ConsoleLogger)')
+      expect(code).toContain('new ConsoleLogger()')
+      expect(code).toContain('new Greeter(_ConsoleLogger)')
       expect(code).toContain('c.register(token(Greeter), _Greeter)')
       // No interpreted manifest data.
       expect(code).not.toContain('SERVICE_MANIFEST')
@@ -214,7 +214,7 @@ describe('manifest generator', () => {
       expect(code).toContain('export interface DiademServices')
       expect(code).toContain('ILogger: ILogger')
       expect(code).toContain('IGreeter: IGreeter')
-      expect(code).toContain('export function createServices()')
+      expect(code).toContain('export function createServices(')
       expect(code).toContain('return container.resolve(IGreeter)')
       // Token classes are imported so they can be both type and resolution key.
       expect(code).toMatch(
@@ -288,6 +288,39 @@ describe('manifest generator', () => {
       expect(code).toContain('new Service()')
       expect(code).not.toContain('new Service(undefined)')
       expect(code).not.toContain('requireExternal')
+    })
+
+    it('exposes an Overrides surface for externals and service mocking', () => {
+      write('src/sdk.ts', `export class PaymentSdk { charge() { return 'ok' } }`)
+      write(
+        'src/svc.ts',
+        `import { singleton } from 'diadem'
+         import { PaymentSdk } from './sdk'
+         export abstract class ILogger { abstract log(): void }
+         @singleton(ILogger) export class Logger extends ILogger { log() {} }
+         export abstract class IGateway { abstract pay(): void }
+         @singleton(IGateway)
+         export class Gateway extends IGateway {
+           constructor(private log: ILogger, private sdk: PaymentSdk) { super() }
+           pay() {}
+         }`
+      )
+      const result = generateManifest(
+        loadConfig(root, { emit: 'compiled', outFile: 'src/generated/c.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+
+      // The importable external becomes a provide-able, typed override.
+      expect(code).toContain('export interface Overrides')
+      expect(code).toContain('PaymentSdk?: PaymentSdk')
+      expect(code).toMatch(/import type \{ PaymentSdk \} from '\.\.\/sdk'/)
+      expect(code).toContain('overrides.PaymentSdk ?? requireExternal')
+      // Services are mockable by token.
+      expect(code).toContain('ILogger?: ILogger')
+      expect(code).toContain('overrides.ILogger ?? new Logger()')
+      // Threaded through both entry points.
+      expect(code).toContain('createContainer(overrides: Overrides = {})')
+      expect(code).toContain('createServices(overrides: Overrides = {})')
     })
   })
 

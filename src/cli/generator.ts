@@ -38,6 +38,8 @@ interface RawDependency {
   isOptional: boolean
   isReadonly: boolean
   isPrivate: boolean
+  /** Where this parameter's type is imported from (for typing externals). */
+  module?: TokenModule
 }
 
 interface ResolvedDependency extends RawDependency {
@@ -279,6 +281,9 @@ function analyzeClass(
   }
 
   const dependencies = analyzeConstructor(node)
+  for (const dep of dependencies) {
+    dep.module = tokenSources.get(dep.typeName)
+  }
   const token = decoratorInfo.token
 
   return {
@@ -794,6 +799,39 @@ function renderCompiled(
     })
     .join('\n')
 
+  // Services that can be replaced via overrides (eager + unique importable token).
+  const overridable = typed.filter((s) => eager.get(s.className))
+  const overridableTokens = new Set(overridable.map((s) => s.token))
+
+  // Non-primitive externals that can be *provided* via overrides — only those
+  // whose type we can import, so the generated file stays type-safe.
+  const externalTypes = new Map<string, string>() // typeName -> import path
+  for (const s of services) {
+    for (const dep of s.resolvedDependencies) {
+      if (
+        dep.external &&
+        dep.module &&
+        externalDefault(dep.typeName) === 'undefined' &&
+        !externalTypes.has(dep.typeName)
+      ) {
+        externalTypes.set(dep.typeName, tokenPath(dep.module))
+      }
+    }
+  }
+  const extImportsByPath = new Map<string, Set<string>>()
+  for (const [typeName, path] of externalTypes) {
+    const set = extImportsByPath.get(path) ?? new Set<string>()
+    set.add(typeName)
+    extImportsByPath.set(path, set)
+  }
+  const externalTypeImports = [...extImportsByPath.keys()]
+    .sort()
+    .map((path) => {
+      const names = [...(extImportsByPath.get(path) ?? [])].sort()
+      return `import type { ${names.join(', ')} } from '${path}'`
+    })
+    .join('\n')
+
   let needsRequireExternal = false
   const argExpr = (service: ServiceInfo): string => {
     const arity = service.dependencies.reduce(
@@ -803,21 +841,27 @@ function renderCompiled(
     const args: string[] = Array.from({ length: arity }, () => 'undefined')
     for (const dep of service.resolvedDependencies) {
       if (dep.external) {
+        // If the external can be provided via overrides, that's the seam.
+        const provided = externalTypes.has(dep.typeName)
+          ? `overrides.${dep.typeName}`
+          : undefined
         if (dep.isOptional) {
-          args[dep.paramIndex] = 'undefined'
+          args[dep.paramIndex] = provided ?? 'undefined'
         } else {
-          // A required external the container can't construct. Use a primitive
-          // default if there is one; otherwise emit a fail-fast throw rather
-          // than silently passing `undefined` (which would crash later).
+          // A required external the container can't construct. Prefer the
+          // override, then a primitive default, then a fail-fast throw — never
+          // a silent `undefined` that crashes later.
           const prim = externalDefault(dep.typeName)
+          let fallback: string
           if (prim !== 'undefined') {
-            args[dep.paramIndex] = prim
+            fallback = prim
           } else {
             needsRequireExternal = true
-            args[dep.paramIndex] =
+            fallback =
               `requireExternal(${JSON.stringify(service.className)}, ` +
               `${JSON.stringify(dep.paramName)}, ${JSON.stringify(dep.typeName)})`
           }
+          args[dep.paramIndex] = provided ? `${provided} ?? ${fallback}` : fallback
         }
         continue
       }
@@ -842,7 +886,11 @@ function renderCompiled(
   for (const service of services) {
     const cls = service.className
     if (eager.get(cls)) {
-      lines.push(`  const ${localName(cls)} = new ${cls}(${argExpr(service)})`)
+      const ovr =
+        service.token && overridableTokens.has(service.token)
+          ? `overrides.${service.token} ?? `
+          : ''
+      lines.push(`  const ${localName(cls)} = ${ovr}new ${cls}(${argExpr(service)})`)
       lines.push(`  c.register(token(${cls}), ${localName(cls)})`)
     } else {
       lines.push(
@@ -850,6 +898,25 @@ function renderCompiled(
       )
     }
   }
+
+  const overrideEntries = [
+    ...overridable.map((s) => `  ${s.token}?: ${s.token}`),
+    ...[...externalTypes.keys()].sort().map((t) => `  ${t}?: ${t}`)
+  ]
+  const hasOverrides = overrideEntries.length > 0
+  const overridesParam = hasOverrides ? 'overrides: Overrides = {}' : ''
+  const overridesArg = hasOverrides ? 'overrides' : ''
+  const overridesType = hasOverrides
+    ? `
+/**
+ * Provide externals or replace services (e.g. mocks in tests), then pass to
+ * createContainer / createServices.
+ */
+export interface Overrides {
+${overrideEntries.join('\n')}
+}
+`
+    : ''
 
   const targetComment = target
     ? `environment: ${target}`
@@ -860,8 +927,8 @@ function renderCompiled(
 function requireExternal(service: any, param: any, type: any): never {
   throw new Error(
     'diadem: ' + service + ' requires an external "' + type + '" (' + param + ') that the ' +
-    'container cannot construct. Make the parameter optional, give it a primitive default, ' +
-    'or wrap the dependency in a @singleton service.'
+    'container cannot construct. Provide it via createContainer overrides, give it a primitive ' +
+    'default, make the parameter optional, or wrap the dependency in a @singleton service.'
   )
 }
 `
@@ -879,11 +946,11 @@ export interface DiademServices {
 ${typed.map((s) => `  ${s.token}: ${s.token}`).join('\n')}
 }
 
-export function createServices(): DiademServices & {
+export function createServices(${overridesParam}): DiademServices & {
   readonly container: DiademContainer
   dispose: () => Promise<void>
 } {
-  const container = createContainer()
+  const container = createContainer(${overridesArg})
   return {
     container,
     dispose: () => container.dispose(),
@@ -907,7 +974,7 @@ ${typed
 
 import { DiademContainer, getDIMetadata } from '${PACKAGE_NAME}'
 
-${serviceImports}
+${serviceImports}${externalTypeImports ? `\n${externalTypeImports}` : ''}
 
 function token(cls: any): any {
   const meta = getDIMetadata(cls)
@@ -916,9 +983,9 @@ function token(cls: any): any {
   }
   return meta.token
 }
-${requireExternalHelper}
+${requireExternalHelper}${overridesType}
 /** Build a fully-wired, ready container. */
-export function createContainer(): DiademContainer {
+export function createContainer(${overridesParam}): DiademContainer {
   const c = new DiademContainer()
 ${lines.join('\n')}
   c.setReady()

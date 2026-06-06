@@ -138,8 +138,59 @@ Trade-offs vs. the default manifest emit:
 - One environment is **baked in** per build (`--target-env`, default: all) — no
   runtime env branching.
 - `lazySingleton` is treated as **eager** (its instance is referenced up front).
-- No runtime mock/override registration — use the manifest emit for dev/test if
-  you rely on that dynamism.
+
+### Providing externals & mocking (overrides)
+
+Compiled mode emits a typed `Overrides` surface and threads it through both
+entry points. Use it to **provide externals** the container can't build, or to
+**replace any service with a mock** in tests:
+
+```ts
+import { createContainer, createServices } from './generated/container'
+
+// Provide a third-party client the container can't construct:
+const container = createContainer({ StripeClient: new StripeClient(secret) })
+
+// Or swap a service for a fake in a test:
+const services = createServices({ ILogger: silentLogger })
+```
+
+Every eager service is overridable by its token, and every importable external
+is provide-able by its type — all type-checked. A required external that you
+*don't* provide fails fast with a clear message (see below), instead of becoming
+a silent `undefined`.
+
+## Bringing in third-party clients (the adapter pattern)
+
+diadem only manages classes it can construct. A raw third-party SDK that needs
+secrets or runtime config (Stripe, a DB pool, an S3 client) isn't one of those —
+it's an **external**. You have two good options:
+
+1. **Wrap it in a `@singleton` adapter** (recommended). Make the SDK a managed
+   service that builds itself from your `IConfig`:
+
+   ```ts
+   @singleton(IPaymentClient)
+   export class StripePaymentClient extends IPaymentClient {
+     private readonly stripe: StripeClient
+     constructor(config: IConfig) {        // config IS a diadem service
+       super()
+       this.stripe = new StripeClient(config.get('STRIPE_KEY'))
+     }
+     charge(cents: number) { return this.stripe.charge(cents).id }
+   }
+   ```
+
+   Now it's a real node in the graph, fully wired — no external, no overrides.
+
+2. **Depend on it directly and provide it** via `createContainer` overrides (above),
+   or make the parameter optional with a fallback. Use this when the instance is
+   built outside the container (a pool from your bootstrap, a client the host
+   framework hands you).
+
+If a *required* external is neither provided nor primitive, `diadem build` warns,
+`--strict` fails the build, and the generated code throws a clear error rather
+than passing `undefined`.
 
 ## Visualize the dependency graph
 
