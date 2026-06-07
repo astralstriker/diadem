@@ -22,12 +22,14 @@ type Lifecycle =
   | 'factory'
   | 'lazy'
   | 'lazySingleton'
+  | 'asyncSingleton'
 
 const LIFECYCLE_BY_DECORATOR: Record<string, Lifecycle> = {
   singleton: 'singleton',
   factory: 'factory',
   lazy: 'lazy',
   lazySingleton: 'lazySingleton',
+  asyncSingleton: 'asyncSingleton',
   injectable: 'dependency'
 }
 
@@ -70,6 +72,10 @@ interface ServiceInfo {
   providerClass?: string
   providerMethod?: string
   providerModule?: TokenModule
+  /** True when the class declares an `onInit()` lifecycle hook. */
+  hasOnInit?: boolean
+  /** True when `onInit()` is async (or a `@provides` method returns a Promise). */
+  isAsync?: boolean
 }
 
 /** A required dependency that no registered service implements. */
@@ -93,6 +99,12 @@ export interface GenerateResult {
    * (the runtime can't call provider methods) — use `--emit=compiled`.
    */
   providerCount: number
+  /**
+   * Services with `async onInit()` or `@asyncSingleton`. In `manifest` emit
+   * these are registered as plain singletons (no await, no init) — use
+   * `--emit=compiled` to fully support async initialization.
+   */
+  asyncCount: number
 }
 
 const PRIMITIVE_TYPES = new Set([
@@ -141,6 +153,7 @@ export function generateManifest(config: DiademConfig): GenerateResult {
   const { services: sorted, cycles, duplicateTokens } = analyzeGraph(config)
 
   const providerCount = sorted.filter((s) => s.providerClass).length
+  const asyncCount = sorted.filter((s) => s.isAsync || s.hasOnInit).length
 
   const outFile = resolve(config.rootDir, config.outFile)
   // Manifest emit is runtime-interpreted and can't call provider methods, so
@@ -180,7 +193,8 @@ export function generateManifest(config: DiademConfig): GenerateResult {
     externalDependencies,
     unresolved,
     duplicateTokens,
-    providerCount
+    providerCount,
+    asyncCount
   }
 }
 
@@ -312,6 +326,15 @@ function analyzeClass(
     dep.module = tokenSources.get(dep.typeName)
   }
   const token = decoratorInfo.token
+  const onInit = findOnInit(node)
+  // onInit and async construction apply to eager services (those built up front).
+  // Factory/lazy services are built on each resolve, where there's no place to
+  // await — so async init there is out of scope.
+  const eager = EAGER_LIFECYCLES.has(decoratorInfo.lifecycle)
+  const isAsync =
+    eager &&
+    (decoratorInfo.lifecycle === 'asyncSingleton' ||
+      (onInit.exists && onInit.async))
 
   return {
     className: node.name.text,
@@ -325,8 +348,36 @@ function analyzeClass(
     exported: isExported(node),
     dependencies,
     resolvedDependencies: [],
-    registrationOrder: 0
+    registrationOrder: 0,
+    hasOnInit: onInit.exists && eager,
+    isAsync
   }
+}
+
+/**
+ * Find an `onInit()` lifecycle hook on a class. Reports whether it exists and
+ * whether it's asynchronous (the `async` keyword or a `Promise<…>` return type).
+ */
+function findOnInit(node: ts.ClassDeclaration): {
+  exists: boolean
+  async: boolean
+} {
+  for (const member of node.members) {
+    if (
+      ts.isMethodDeclaration(member) &&
+      ts.isIdentifier(member.name) &&
+      member.name.text === 'onInit'
+    ) {
+      const modifiers = ts.canHaveModifiers(member)
+        ? (ts.getModifiers(member) ?? [])
+        : []
+      const isAsync =
+        modifiers.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ||
+        (!!member.type && member.type.getText().trim().startsWith('Promise'))
+      return { exists: true, async: isAsync }
+    }
+  }
+  return { exists: false, async: false }
 }
 
 interface DecoratorInfo {
@@ -464,6 +515,14 @@ function analyzeProvider(
       for (const dep of dependencies) {
         dep.module = tokenSources.get(dep.typeName)
       }
+      // An async @provides method (async keyword or Promise return) is an async
+      // factory — its result must be awaited.
+      const methodModifiers = ts.canHaveModifiers(member)
+        ? (ts.getModifiers(member) ?? [])
+        : []
+      const isAsync =
+        methodModifiers.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ||
+        (!!member.type && member.type.getText().trim().startsWith('Promise'))
       out.push({
         className: `${providerClass}#${method}`,
         lifecycle: 'singleton',
@@ -479,7 +538,8 @@ function analyzeProvider(
         registrationOrder: 0,
         providerClass,
         providerMethod: method,
-        providerModule: { kind: 'file', fullPath }
+        providerModule: { kind: 'file', fullPath },
+        isAsync
       })
     }
   }
@@ -704,7 +764,7 @@ function renderManifest(
     .join(',\n')
 
   const lifecycleCounts = (
-    ['dependency', 'singleton', 'factory', 'lazy', 'lazySingleton'] as const
+    ['dependency', 'singleton', 'factory', 'lazy', 'lazySingleton', 'asyncSingleton'] as const
   )
     .map((lc) => `    ${lc}: ${services.filter((s) => s.lifecycle === lc).length}`)
     .join(',\n')
@@ -811,7 +871,8 @@ ${lifecycleCounts}
 const EAGER_LIFECYCLES: ReadonlySet<Lifecycle> = new Set([
   'singleton',
   'dependency',
-  'lazySingleton'
+  'lazySingleton',
+  'asyncSingleton'
 ])
 
 function localName(className: string): string {
@@ -997,6 +1058,9 @@ function renderCompiled(
     return args.join(', ')
   }
 
+  // Detect if any service needs awaited async construction (asyncSingleton or async onInit).
+  const anyAsync = services.some((s) => s.isAsync)
+
   const lines: string[] = []
 
   // Instantiate each provider class once (provider classes are dependency-free).
@@ -1019,13 +1083,23 @@ function renderCompiled(
         ? `overrides.${service.token} ?? `
         : ''
     if (service.providerClass && service.providerMethod) {
-      // @provides factory method, registered under its token.
-      lines.push(
-        `  const ${localName(cls)} = ${ovr}${providerLocal(service.providerClass)}.${service.providerMethod}(${argExpr(service)})`
-      )
+      // @provides factory method, registered under its token. Async if the
+      // method is async — await it in async containers.
+      const factoryCall = `${ovr}${anyAsync && service.isAsync ? 'await ' : ''}${providerLocal(service.providerClass)}.${service.providerMethod}(${argExpr(service)})`
+      lines.push(`  const ${localName(cls)} = ${factoryCall}`)
       lines.push(`  c.register(${service.token}, ${localName(cls)})`)
     } else if (eager.get(cls)) {
       lines.push(`  const ${localName(cls)} = ${ovr}new ${cls}(${argExpr(service)})`)
+      // Call onInit hook if present. For eager services with async onInit, await
+      // it in async containers. Skip onInit if the instance was overridden.
+      if (service.hasOnInit) {
+        const initCall = `${anyAsync && service.isAsync ? 'await ' : ''}${localName(cls)}.onInit()`
+        if (service.token && overridableTokens.has(service.token)) {
+          lines.push(`  if (!overrides.${service.token}) ${initCall}`)
+        } else {
+          lines.push(`  ${initCall}`)
+        }
+      }
       lines.push(`  c.register(token(${cls}), ${localName(cls)})`)
     } else {
       lines.push(
@@ -1069,10 +1143,39 @@ function requireExternal(service: any, param: any, type: any): never {
 `
     : ''
 
-  const accessorBlock =
-    typed.length === 0
-      ? ''
-      : `
+  const accessorBlock = (() => {
+    if (typed.length === 0) return ''
+    // If async services exist, only emit async API (createServicesAsync). If fully
+    // sync, emit sync API (createServices). This keeps each generated file coherent.
+    if (anyAsync) {
+      return `
+/**
+ * Type-safe accessor surface. Only registered tokens are present, each typed to
+ * its token — resolving an unregistered token is a compile error.
+ */
+export interface DiademServices {
+${typed.map((s) => `  ${s.token}: ${s.token}`).join('\n')}
+}
+
+export async function createServicesAsync(${overridesParam}): Promise<DiademServices & {
+  readonly container: DiademContainer
+  dispose: () => Promise<void>
+}> {
+  const container = await createContainerAsync(${overridesArg})
+  return {
+    container,
+    dispose: () => container.dispose(),
+${typed
+  .map(
+    (s) =>
+      `    get ${s.token}(): ${s.token} {\n      return container.resolve(${s.token})\n    }`
+  )
+  .join(',\n')}
+  }
+}
+`
+    } else {
+      return `
 /**
  * Type-safe accessor surface. Only registered tokens are present, each typed to
  * its token — resolving an unregistered token is a compile error.
@@ -1098,6 +1201,8 @@ ${typed
   }
 }
 `
+    }
+  })()
 
   return `/**
  * Auto-generated by \`diadem build --emit=compiled\`. DO NOT EDIT MANUALLY.
@@ -1119,12 +1224,22 @@ function token(cls: any): any {
   return meta.token
 }
 ${requireExternalHelper}${overridesType}
-/** Build a fully-wired, ready container. */
+${
+  anyAsync
+    ? `/** Build a fully-wired, ready container asynchronously (async services require await). */
+export async function createContainerAsync(${overridesParam}): Promise<DiademContainer> {
+  const c = new DiademContainer()
+${lines.join('\n')}
+  c.setReady()
+  return c
+}`
+    : `/** Build a fully-wired, ready container. */
 export function createContainer(${overridesParam}): DiademContainer {
   const c = new DiademContainer()
 ${lines.join('\n')}
   c.setReady()
   return c
+}`
 }
 ${accessorBlock}`
 }

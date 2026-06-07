@@ -265,6 +265,12 @@ function buildOnce(config: DiademConfig, args: ParsedArgs): boolean {
         `provider methods only run with --emit=compiled\n`
     )
   }
+  if (result.asyncCount > 0 && config.emit !== 'compiled') {
+    process.stderr.write(
+      `diadem: warning — ${result.asyncCount} service(s) use onInit or @asyncSingleton; ` +
+        `async init only runs with --emit=compiled\n`
+    )
+  }
 
   for (const token of result.duplicateTokens) {
     process.stderr.write(

@@ -1,5 +1,20 @@
 # diadem
 
+## 0.2.1
+
+Async services and lifecycle hooks.
+
+- **`@asyncSingleton` decorator** — for services that need awaited initialization
+  (database pools, secret clients, etc.). Pairs with an `async onInit()` method on
+  the service. Async services are only wired by **compiled emit** (`--emit=compiled`),
+  which generates `createContainerAsync()` instead of `createContainer()`. Manifest
+  emit skips them with a warning.
+- **`onInit()` lifecycle hook** — sync or async post-construction setup method,
+  called after the service is constructed. Applicable to eager services (singletons,
+  lazy singletons, async singletons). Automatically invoked only in compiled emit;
+  skipped if the service is overridden. Enables DB connection pooling, config
+  loading, warm-up logic without polluting constructors.
+
 ## 0.2.0
 
 Expressiveness pass — value/factory bindings and a watch mode.

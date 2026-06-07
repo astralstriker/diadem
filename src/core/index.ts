@@ -15,7 +15,13 @@
 // Import for local usage
 import type { Constructor, DIContainer } from './container'
 import { DiademContainer } from './container'
-import { factory, lazy, lazySingleton, singleton } from './decorators'
+import {
+  asyncSingleton,
+  factory,
+  lazy,
+  lazySingleton,
+  singleton
+} from './decorators'
 
 // Container and types
 export {
@@ -29,6 +35,7 @@ export {
 
 // Decorators for auto-registration
 export {
+  asyncSingleton,
   factory,
   getDIMetadata,
   getDIRegistrationStats,
@@ -73,7 +80,8 @@ export const decorators = {
   singleton,
   factory,
   lazy,
-  lazySingleton
+  lazySingleton,
+  asyncSingleton
 } as const
 
 /**

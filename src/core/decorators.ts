@@ -18,7 +18,12 @@ const DI_PROVIDER_KEY = Symbol('di:provider')
 const DI_PROVIDES_KEY = Symbol('di:provides')
 
 // Lifecycle types
-export type LifecycleType = 'singleton' | 'factory' | 'lazy' | 'lazySingleton'
+export type LifecycleType =
+  | 'singleton'
+  | 'factory'
+  | 'lazy'
+  | 'lazySingleton'
+  | 'asyncSingleton'
 
 // Metadata interface
 export interface DIMetadata {
@@ -181,6 +186,32 @@ export function lazySingleton<T>(token: AbstractConstructor<T>, env?: string) {
   }
 }
 
+/**
+ * Decorator to register a class as an **async singleton**: an eager singleton
+ * whose construction needs awaited setup (a DB pool, a secrets fetch). Pair it
+ * with an `async onInit()` method — diadem constructs the instance, awaits
+ * `onInit()`, then caches it. Async services are wired by **compiled emit**
+ * (`--emit=compiled`), which generates a `createContainerAsync()`.
+ *
+ * @param token The interface/abstract class token to register against
+ * @param env Optional environment filter
+ *
+ * @example
+ * ```typescript
+ * @asyncSingleton(IDatabase)
+ * export class Database extends IDatabase {
+ *   constructor(private readonly config: IConfig) { super() }
+ *   async onInit() { this.pool = await connect(this.config.get('DB_URL')) }
+ * }
+ * ```
+ */
+export function asyncSingleton<T>(token: AbstractConstructor<T>, env?: string) {
+  return function <U extends ConcreteConstructor<T>>(target: U): U {
+    setDIMetadata(target, token, 'asyncSingleton', env)
+    return target
+  }
+}
+
 // Manual discovery functions removed - use manifest-based auto-discovery instead
 
 // Manual registration functions removed - use manifest-based auto-discovery instead
@@ -221,6 +252,7 @@ export function getDIRegistrationStats(classes: ConcreteConstructor[]): {
 
     switch (metadata.lifecycle) {
       case 'singleton':
+      case 'asyncSingleton':
         stats.singletons++
         break
       case 'factory':
