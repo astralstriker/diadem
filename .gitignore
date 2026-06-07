@@ -10,3 +10,6 @@ coverage/
 # Generated example artifacts (run the tools to (re)create them)
 examples/**/generated/
 examples/**/*.html
+
+# Documentation to be ignored
+DIADEM*.md

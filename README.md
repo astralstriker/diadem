@@ -5,28 +5,17 @@
 ![reflect-metadata: none](https://img.shields.io/badge/reflect--metadata-none-brightgreen)
 ![license: MIT](https://img.shields.io/badge/license-MIT-green)
 
-> Build-time, manifest-driven dependency injection for TypeScript — SSR-safe, framework-agnostic, zero runtime reflection.
+> Build-time architecture visibility for TypeScript. Generate a canonical dependency graph, enforce architectural boundaries, and make software structure explicit — SSR-safe, framework-agnostic, zero runtime reflection.
 
-**diadem** wires your services from a manifest that is generated at build time. A
-generator analyses your decorated classes, extracts each constructor's
-dependencies, topologically sorts them, and emits a manifest module. At runtime
-the container reads that manifest and autowires everything — **no
-`reflect-metadata`, no runtime constructor parsing, no global state**. You create
-and own the container (usually one per application); because the library keeps no
-hidden global container, it is safe in concurrent/SSR environments, and you can
-spin up child scopes for per-request isolation when you need it.
+**diadem** makes your software architecture visible. It analyzes decorated classes at build time, extracts dependencies, and generates both a **manifest for wiring** and a **dependency graph for understanding**. At runtime, the container reads the manifest and autowires everything — **no `reflect-metadata`, no runtime constructor parsing, no global state**. You create and own the container (usually one per application); because the library keeps no hidden global container, it is safe in concurrent/SSR environments, and you can spin up child scopes for per-request isolation when you need it.
 
 ```
-   decorated classes  ──►  build-time generator  ──►  service-manifest.ts
-                                                              │
-                                                              ▼
-                              configureManifest(manifest) ──► DiademContainer
+   decorated classes  ──►  build-time generator  ──►  service-manifest.ts  ──┐
+                                                                               ├──► DiademContainer
+                                                      ──►  dependency graph  ──┘
 ```
 
-> **Status:** early but complete (`0.1.0`). The runtime container, decorators,
-> dependency resolver, and the **`diadem build` manifest generator** are all in
-> place. You can also hand-write a manifest conforming to `ServiceManifestModule`
-> (see [`examples/basic.ts`](examples/basic.ts)).
+> **Status:** Production-ready DI foundation (v0.2.1) with build-time cycle detection, async lifecycle hooks, and provider bindings. Architectural insights in active development. The runtime container, decorators, dependency resolver, **`diadem build` manifest generator**, and **`diadem graph` visualizer** are all in place. See [DIADEM_VISION.md](DIADEM_VISION.md) for the architectural intelligence roadmap.
 
 ## Install
 
@@ -47,20 +36,19 @@ only to run the `diadem build` generator.
 }
 ```
 
-## Generating the manifest
+## Build-time architecture generation
 
 Run the generator after writing or changing decorated services:
 
 ```bash
-npx diadem build
-npx diadem build --watch   # rebuild automatically as you edit
+npx diadem build              # generate service wiring
+npx diadem build --watch      # rebuild automatically as you edit
+npx diadem graph --serve      # visualize your dependency graph
 ```
 
-It scans your source, finds DI-decorated classes via the TypeScript AST,
-extracts and topologically sorts their constructor dependencies, and writes a
-manifest module (default: `src/generated/service-manifest.ts`). Import paths in
-the output are computed relative to the manifest file, so no path aliases are
-required.
+**`diadem build`** scans your source, finds DI-decorated classes via the TypeScript AST, extracts and topologically sorts their constructor dependencies, and writes a manifest module (default: `src/generated/service-manifest.ts`). Import paths in the output are computed relative to the manifest file, so no path aliases are required.
+
+**`diadem graph`** analyzes the same source and generates an interactive HTML visualization of your dependency graph — nodes are services (colored by lifecycle), edges show dependencies, cycles are flagged, and you can inspect each service's dependencies and dependents. This is where you see your architecture.
 
 Configure via flags or a `diadem.config.json` in the project root (flags win):
 
@@ -135,7 +123,14 @@ through decorators + auto-discovery, with no custom TypeScript transformer.
 (Ambiguous or unlocatable tokens are omitted from the typed surface but still
 wired into `createContainer()`.)
 
-Trade-offs vs. the default manifest emit:
+**Architecture as code.** Compiled emit doesn't just wire services — it encodes architectural decisions as TypeScript:
+
+- **Lifecycles** (singleton/lazy/async) reveal initialization topology and when instances are shared vs. fresh
+- **Dependencies** show coupling and layering — which services talk to which
+- **Providers** represent cross-cutting concerns — config, logging, integrations
+- **Overrides** support testing and environment-specific composition — architectural seams
+
+This metadata becomes the foundation for architectural analysis: detecting cycles, measuring coupling, identifying hotspots, and enforcing boundaries.
 - One environment is **baked in** per build (`--target-env`, default: all) — no
   runtime env branching.
 - `lazySingleton` is treated as **eager** (its instance is referenced up front).
@@ -214,13 +209,9 @@ If a *required* external is neither provided nor primitive, `diadem build` warns
 `--strict` fails the build, and the generated code throws a clear error rather
 than passing `undefined`.
 
-## Visualize the dependency graph
+## See your architecture
 
-`diadem graph` writes a self-contained, interactive HTML page of your dependency
-graph — nodes are services (colored by lifecycle), arrows point to what they
-depend on, cycles are flagged in red, and clicking a node shows its
-dependencies and dependents. It reads the same source as `diadem build`, so no
-running app or manifest is required.
+The dependency graph is the primary artifact — it makes your software structure explicit.
 
 ```bash
 npx diadem graph --serve         # opens http://localhost:4321 (re-analyzes on refresh)
@@ -228,10 +219,21 @@ npx diadem graph                 # or write a file: diadem-graph.html
 npx diadem graph --out docs/di.html --target-env production
 ```
 
-`--serve` runs a tiny local server (like a studio) and re-renders on every
-refresh, so you can edit a service, reload, and see the change. Plain `diadem
-graph` writes a self-contained HTML file instead. Either way it loads its graph
-layout library from a CDN, so view it online.
+`--serve` runs a local dev server and re-renders on every refresh, so you can edit a service, reload, and immediately see the updated graph. Plain `diadem graph` writes a self-contained HTML file instead — no running app required. The graph is interactive: click a service to inspect its dependencies, dependents, and lifecycle, and cycles are highlighted in red.
+
+## Architectural insights
+
+The dependency graph reveals what's already happening in your code — patterns that are easy to miss in the codebase:
+
+**Dependency cycles** — Services depending on each other create circular chains. `diadem build --strict` catches these at build time and fails the build before they become runtime errors.
+
+**Over-coupled services** — A service with many dependents (high fan-in) or many dependencies (high fan-out) may be a bottleneck or architectural hotspot. The graph makes these visible instantly.
+
+**Lifecycle mismatches** — A transient service depending on a singleton, or a singleton depending on a scoped service. The graph color-codes by lifecycle, so violations jump out.
+
+**External dependencies** — Services that depend on things the container can't construct (third-party APIs, runtime config). `diadem build` tracks these and warns or fails with `--strict`.
+
+**Architectural boundaries** — The graph shows which services talk to which, revealing whether your intended layering (controller → application → domain → infrastructure) matches reality.
 
 ## Concepts
 
@@ -391,35 +393,32 @@ your `tsconfig` decorator setting doesn't change the wiring.
 
 ## Roadmap
 
-Planned in roughly this order (the `~>` items are the priority):
+Diadem is evolving toward an **Architectural Intelligence Platform**. The DI container is the foundation; the dependency graph is the primary product. See [DIADEM_VISION.md](DIADEM_VISION.md) for the long-term direction:
 
-**v0.2 — expressiveness**
-1. ✅ `diadem build --watch` — regenerate on source change *(shipped)*.
-2. ✅ **Value/factory bindings** via a `@provides` provider class — bind tokens
-   to values/factories, not just classes (the one capability nearly every other
-   container has and diadem doesn't) *(shipped, compiled mode)*.
-3. `~>` **Async services** — `@asyncSingleton` + a generated `createContainerAsync`,
-   for dependencies that need awaited init (DB pools, secrets).
-4. `onInit` lifecycle hook (falls out of async work).
+- **Layer 1 — Runtime foundation** (current) — production-ready DI, lifecycle management, async init, provider bindings
+- **Layer 2 — Canonical graph** (parallel) — service graph generation, module boundaries, metadata extraction
+- **Layer 3 — Architectural insights** (planned) — cycle detection, coupling metrics, boundary enforcement, health scoring
+- **Layer 4 — Ecosystem** (future) — VS Code extension, CI/CD checks, dashboards, documentation generators
 
-**v0.3 — collections & scope**
-5. **Multi-binding** — `@singleton(IPlugin, { multi: true })` + `resolveAll` /
-   inject `IPlugin[]`, for plugin/handler architectures.
-6. True lazy in compiled mode (honor `lazySingleton` instead of eager).
-7. Managed **request scope** — `@scoped('request')` + `createRequestScope()`.
+### Immediate roadmap (v0.2.x → v0.3)
 
-**v0.4 — structure & ecosystem**
-8. Framework adapters (Express/Fastify per-request scope, a React provider).
-9. **Modules / encapsulation** (private providers, building on `@provides`).
-10. Named/qualified bindings (largely solvable today with distinct tokens).
+**v0.2.x** — Runtime foundation maturity
+1. ✅ `diadem build --watch` *(0.2.0)*.
+2. ✅ **Value/factory bindings** via `@provides` *(0.2.0, compiled mode)*.
+3. ✅ **Async services** — `@asyncSingleton` + `createContainerAsync`, `onInit` lifecycle hook *(0.2.1)*.
 
-**Later / optional**
-11. Circular-dependency escape (lazy/`forwardRef`-style) — kept rejected by default.
-12. Property/setter injection.
+**v0.3** — Architectural expressiveness
+4. **Multi-binding** — `@singleton(IPlugin, { multi: true })` + `resolveAll` for plugin architectures.
+5. True lazy in compiled mode (honor `lazySingleton` instead of eager).
+6. Managed **request scope** — `@scoped('request')` + `createRequestScope()`.
 
-**Smaller items:** type-driven `--strict` (verify the graph at the type level,
-not just by token name), unused-service detection, and an offline mode for
-`diadem graph` (inline the layout library).
+### Future (v0.4+)
+
+7. Framework adapters (Express/Fastify per-request scope, React provider).
+8. **Modules & encapsulation** — private providers, bounded contexts.
+9. Graph export formats (JSON/GraphQL) for tooling integration.
+
+**Later / optional:** Named/qualified bindings, circular-dependency escape, property/setter injection, type-driven `--strict`, unused-service detection, offline graph viewer.
 
 **Non-goals**
 - A custom-transformer mode for `resolve<IFoo>()` / interface tokens. That's
