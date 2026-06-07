@@ -1,5 +1,11 @@
 # diadem
 
+## 0.2.2
+
+### Patch Changes
+
+- decef2c: Async services (@asyncSingleton) and onInit lifecycle hooks
+
 ## 0.2.1
 
 Async services and lifecycle hooks.
