@@ -1,6 +1,6 @@
 {
   "name": "@devcraft-ts/diadem",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Build-time, manifest-driven dependency injection for TypeScript. SSR-safe, framework-agnostic, zero runtime reflection.",
   "keywords": [
     "dependency-injection",
