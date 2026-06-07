@@ -184,7 +184,28 @@ it's an **external**. You have two good options:
 
    Now it's a real node in the graph, fully wired — no external, no overrides.
 
-2. **Depend on it directly and provide it** via `createContainer` overrides (above),
+2. **Bind it with a `@provides` provider** *(compiled mode)*. When a constructor
+   adapter feels heavy — you just want to hand the container a value or run a
+   factory — declare a provider class. Its `@provides` methods bind a token to
+   whatever they return, and their parameters are injected like constructor deps:
+
+   ```ts
+   @provider()
+   export class Integrations {
+     @provides(StripeClient)
+     stripe(config: IConfig): StripeClient {     // config IS a diadem service
+       return new StripeClient(config.get('STRIPE_KEY'))
+     }
+   }
+   ```
+
+   Now any service can depend on `StripeClient` and the container injects the
+   bound instance — no external, no overrides. Provider bindings are wired at
+   build time, so they only run under `--emit=compiled` (manifest mode is
+   runtime-interpreted and skips them with a warning). Bindings stay overridable:
+   `createContainer({ StripeClient: fake })` replaces one in a test.
+
+3. **Depend on it directly and provide it** via `createContainer` overrides (above),
    or make the parameter optional with a fallback. Use this when the instance is
    built outside the container (a pool from your bootstrap, a client the host
    framework hands you).
@@ -364,7 +385,9 @@ unresolved/ambiguous tokens into build errors) rather than fully type-driven; a
 singleton's factory runs at registration, so **registration order matters** (the
 generator emits services in topological order for you; use `lazySingleton` to
 defer construction); and the generated manifest grows with the number of
-services. It uses legacy (`experimentalDecorators`) decorators.
+services. The decorators work under both TC39 (Stage 3) and legacy
+(`experimentalDecorators`) modes — they're read from source at build time, so
+your `tsconfig` decorator setting doesn't change the wiring.
 
 ## Roadmap
 
@@ -372,9 +395,9 @@ Planned in roughly this order (the `~>` items are the priority):
 
 **v0.2 — expressiveness**
 1. ✅ `diadem build --watch` — regenerate on source change *(shipped)*.
-2. `~>` **Value/factory bindings** via a `@provides` provider class — bind tokens
+2. ✅ **Value/factory bindings** via a `@provides` provider class — bind tokens
    to values/factories, not just classes (the one capability nearly every other
-   container has and diadem doesn't).
+   container has and diadem doesn't) *(shipped, compiled mode)*.
 3. `~>` **Async services** — `@asyncSingleton` + a generated `createContainerAsync`,
    for dependencies that need awaited init (DB pools, secrets).
 4. `onInit` lifecycle hook (falls out of async work).

@@ -32,13 +32,17 @@ export {
   factory,
   getDIMetadata,
   getDIRegistrationStats,
+  getProviderMetadata,
   hasDIMetadata,
   isClassRegisteredForEnvironment,
   lazy,
   lazySingleton,
+  provider,
+  provides,
   singleton,
   type LifecycleType as DecoratorLifecycleType,
-  type DIMetadata
+  type DIMetadata,
+  type ProvidesEntry
 } from './decorators'
 
 // Type definitions

@@ -66,6 +66,10 @@ interface ServiceInfo {
   dependencies: RawDependency[]
   resolvedDependencies: ResolvedDependency[]
   registrationOrder: number
+  /** Set when this "service" is a @provides method on a @provider class. */
+  providerClass?: string
+  providerMethod?: string
+  providerModule?: TokenModule
 }
 
 /** A required dependency that no registered service implements. */
@@ -84,6 +88,11 @@ export interface GenerateResult {
   unresolved: UnresolvedDependency[]
   /** Tokens declared by more than one service (ambiguous resolution). */
   duplicateTokens: string[]
+  /**
+   * `@provider` method bindings found. In `manifest` emit these are skipped
+   * (the runtime can't call provider methods) — use `--emit=compiled`.
+   */
+  providerCount: number
 }
 
 const PRIMITIVE_TYPES = new Set([
@@ -131,21 +140,28 @@ function analyzeGraph(config: DiademConfig): {
 export function generateManifest(config: DiademConfig): GenerateResult {
   const { services: sorted, cycles, duplicateTokens } = analyzeGraph(config)
 
+  const providerCount = sorted.filter((s) => s.providerClass).length
+
   const outFile = resolve(config.rootDir, config.outFile)
+  // Manifest emit is runtime-interpreted and can't call provider methods, so
+  // `@provides` bindings only work in compiled wiring. Drop them from manifest
+  // output (the CLI surfaces a warning via providerCount).
+  const emitted =
+    config.emit === 'compiled' ? sorted : sorted.filter((s) => !s.providerClass)
   const content =
     config.emit === 'compiled'
-      ? renderCompiled(sorted, config, outFile)
-      : renderManifest(sorted, config, outFile)
+      ? renderCompiled(emitted, config, outFile)
+      : renderManifest(emitted, config, outFile)
   mkdirSync(dirname(outFile), { recursive: true })
   writeFileSync(outFile, content, 'utf8')
 
-  const externalDependencies = sorted.reduce(
+  const externalDependencies = emitted.reduce(
     (sum, s) => sum + s.resolvedDependencies.filter((d) => d.external).length,
     0
   )
 
   const unresolved: UnresolvedDependency[] = []
-  for (const service of sorted) {
+  for (const service of emitted) {
     for (const dep of service.resolvedDependencies) {
       if (dep.external && !dep.isOptional) {
         unresolved.push({
@@ -159,11 +175,12 @@ export function generateManifest(config: DiademConfig): GenerateResult {
 
   return {
     outFile,
-    serviceCount: sorted.length,
+    serviceCount: emitted.length,
     cycles,
     externalDependencies,
     unresolved,
-    duplicateTokens
+    duplicateTokens,
+    providerCount
   }
 }
 
@@ -253,9 +270,19 @@ function analyzeFile(fullPath: string, relPath: string): ServiceInfo[] {
   const services: ServiceInfo[] = []
   ts.forEachChild(source, function visit(node) {
     if (ts.isClassDeclaration(node)) {
-      const info = analyzeClass(node, fullPath, relPath, exportedClasses, tokenSources)
-      if (info) {
-        services.push(info)
+      if (isProviderClass(node)) {
+        services.push(...analyzeProvider(node, fullPath, relPath, tokenSources))
+      } else {
+        const info = analyzeClass(
+          node,
+          fullPath,
+          relPath,
+          exportedClasses,
+          tokenSources
+        )
+        if (info) {
+          services.push(info)
+        }
       }
     }
     ts.forEachChild(node, visit)
@@ -345,16 +372,11 @@ function findDIDecorator(node: ts.ClassDeclaration): DecoratorInfo | null {
   return null
 }
 
-function analyzeConstructor(node: ts.ClassDeclaration): RawDependency[] {
-  const ctor = node.members.find((m) => ts.isConstructorDeclaration(m)) as
-    | ts.ConstructorDeclaration
-    | undefined
-  if (!ctor) {
-    return []
-  }
-
+function analyzeParams(
+  params: ts.NodeArray<ts.ParameterDeclaration>
+): RawDependency[] {
   const deps: RawDependency[] = []
-  ctor.parameters.forEach((param, index) => {
+  params.forEach((param, index) => {
     if (!param.type) {
       return
     }
@@ -362,11 +384,9 @@ function analyzeConstructor(node: ts.ClassDeclaration): RawDependency[] {
     if (isPrimitive(typeName)) {
       return
     }
-
     const modifiers = ts.canHaveModifiers(param)
       ? (ts.getModifiers(param) ?? [])
       : []
-
     deps.push({
       paramName: param.name.getText(),
       paramIndex: index,
@@ -378,8 +398,92 @@ function analyzeConstructor(node: ts.ClassDeclaration): RawDependency[] {
       isPrivate: modifiers.some((m) => m.kind === ts.SyntaxKind.PrivateKeyword)
     })
   })
-
   return deps
+}
+
+function analyzeConstructor(node: ts.ClassDeclaration): RawDependency[] {
+  const ctor = node.members.find((m) => ts.isConstructorDeclaration(m)) as
+    | ts.ConstructorDeclaration
+    | undefined
+  return ctor ? analyzeParams(ctor.parameters) : []
+}
+
+function isProviderClass(node: ts.ClassDeclaration): boolean {
+  const decorators = ts.canHaveDecorators(node)
+    ? (ts.getDecorators(node) ?? [])
+    : []
+  return decorators.some((d) => {
+    const expr = d.expression
+    const name = ts.isCallExpression(expr)
+      ? expr.expression.getText()
+      : ts.isIdentifier(expr)
+        ? expr.getText()
+        : ''
+    return name === 'provider'
+  })
+}
+
+/** Turn a @provider class's @provides methods into provider service entries. */
+function analyzeProvider(
+  node: ts.ClassDeclaration,
+  fullPath: string,
+  relPath: string,
+  tokenSources: Map<string, TokenModule>
+): ServiceInfo[] {
+  if (!node.name || !isExported(node)) {
+    // A provider class must be exported so the compiled wiring can import it.
+    return []
+  }
+  const providerClass = node.name.text
+  const out: ServiceInfo[] = []
+
+  for (const member of node.members) {
+    if (!ts.isMethodDeclaration(member) || !ts.isIdentifier(member.name)) {
+      continue
+    }
+    const decorators = ts.canHaveDecorators(member)
+      ? (ts.getDecorators(member) ?? [])
+      : []
+    for (const decorator of decorators) {
+      const expr = decorator.expression
+      if (!ts.isCallExpression(expr) || expr.expression.getText() !== 'provides') {
+        continue
+      }
+      const args = expr.arguments
+      const token =
+        args.length > 0 && ts.isIdentifier(args[0])
+          ? args[0].getText()
+          : undefined
+      if (!token) {
+        continue
+      }
+      const environment =
+        args.length > 1 && ts.isStringLiteral(args[1]) ? args[1].text : undefined
+      const method = member.name.text
+      const dependencies = analyzeParams(member.parameters)
+      for (const dep of dependencies) {
+        dep.module = tokenSources.get(dep.typeName)
+      }
+      out.push({
+        className: `${providerClass}#${method}`,
+        lifecycle: 'singleton',
+        environment,
+        token,
+        tokenExported: false,
+        tokenModule: tokenSources.get(token),
+        fullPath,
+        filePath: relPath.replace(/\\/g, '/'),
+        exported: true,
+        dependencies,
+        resolvedDependencies: [],
+        registrationOrder: 0,
+        providerClass,
+        providerMethod: method,
+        providerModule: { kind: 'file', fullPath }
+      })
+    }
+  }
+  return out
 }
 
 function extractTypeName(typeNode: ts.TypeNode): string {
@@ -711,7 +815,9 @@ const EAGER_LIFECYCLES: ReadonlySet<Lifecycle> = new Set([
 ])
 
 function localName(className: string): string {
-  return `_${className}`
+  // Provider entries use synthetic ids like "CoreProviders#config" — sanitize to
+  // a valid JS identifier.
+  return `_${className.replace(/[^A-Za-z0-9_$]/g, '_')}`
 }
 
 function externalDefault(typeName: string): string {
@@ -763,8 +869,19 @@ function renderCompiled(
     names.add(name)
     importsByPath.set(path, names)
   }
+  const tokenPath = (m: TokenModule): string =>
+    m.kind === 'file' ? importPathFor(outFile, m.fullPath) : m.specifier
   for (const service of services) {
-    addImport(importPathFor(outFile, service.fullPath), service.className)
+    if (service.providerClass && service.providerModule) {
+      // Import the provider class (its method is the factory) + the token to
+      // register under, not the synthetic entry id.
+      addImport(tokenPath(service.providerModule), service.providerClass)
+      if (service.token && service.tokenModule) {
+        addImport(tokenPath(service.tokenModule), service.token)
+      }
+    } else {
+      addImport(importPathFor(outFile, service.fullPath), service.className)
+    }
   }
 
   // Services exposed in the type-safe accessor surface: those with a uniquely
@@ -776,8 +893,6 @@ function renderCompiled(
       tokenCount.set(s.token, (tokenCount.get(s.token) ?? 0) + 1)
     }
   }
-  const tokenPath = (m: TokenModule): string =>
-    m.kind === 'file' ? importPathFor(outFile, m.fullPath) : m.specifier
   const typed = services.filter(
     (s): s is ServiceInfo & { token: string; tokenModule: TokenModule } =>
       !!s.token &&
@@ -883,13 +998,33 @@ function renderCompiled(
   }
 
   const lines: string[] = []
+
+  // Instantiate each provider class once (provider classes are dependency-free).
+  const providerLocal = (pc: string): string => `_provider_${pc}`
+  const providerClasses = [
+    ...new Set(
+      services
+        .filter((s) => s.providerClass)
+        .map((s) => s.providerClass as string)
+    )
+  ]
+  for (const pc of providerClasses) {
+    lines.push(`  const ${providerLocal(pc)} = new ${pc}()`)
+  }
+
   for (const service of services) {
     const cls = service.className
-    if (eager.get(cls)) {
-      const ovr =
-        service.token && overridableTokens.has(service.token)
-          ? `overrides.${service.token} ?? `
-          : ''
+    const ovr =
+      service.token && overridableTokens.has(service.token)
+        ? `overrides.${service.token} ?? `
+        : ''
+    if (service.providerClass && service.providerMethod) {
+      // @provides factory method, registered under its token.
+      lines.push(
+        `  const ${localName(cls)} = ${ovr}${providerLocal(service.providerClass)}.${service.providerMethod}(${argExpr(service)})`
+      )
+      lines.push(`  c.register(${service.token}, ${localName(cls)})`)
+    } else if (eager.get(cls)) {
       lines.push(`  const ${localName(cls)} = ${ovr}new ${cls}(${argExpr(service)})`)
       lines.push(`  c.register(token(${cls}), ${localName(cls)})`)
     } else {

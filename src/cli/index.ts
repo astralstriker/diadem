@@ -259,6 +259,12 @@ function buildOnce(config: DiademConfig, args: ParsedArgs): boolean {
       `diadem: ${result.externalDependencies} external dependencies (not container-managed)\n`
     )
   }
+  if (result.providerCount > 0 && config.emit !== 'compiled') {
+    process.stderr.write(
+      `diadem: warning — ${result.providerCount} @provides binding(s) skipped; ` +
+        `provider methods only run with --emit=compiled\n`
+    )
+  }
 
   for (const token of result.duplicateTokens) {
     process.stderr.write(

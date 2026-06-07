@@ -1,5 +1,23 @@
 # diadem
 
+## 0.2.0
+
+Expressiveness pass — value/factory bindings and a watch mode.
+
+- **Value/factory bindings** via `@provider` classes and `@provides` methods.
+  Bind a token to whatever a method returns (a third-party SDK client, a
+  config-derived value, a computed instance), with the method's parameters
+  injected like constructor dependencies. Bindings are wired at build time in
+  **compiled emit** (`--emit=compiled`) and stay overridable for tests; manifest
+  emit skips them with a warning (it can't call provider methods at runtime).
+  The decorators work under both TC39 and legacy (`experimentalDecorators`)
+  modes.
+- **`diadem build --watch`** — regenerate the manifest/compiled wiring as source
+  changes (debounced, ignores its own output, survives errors).
+- **Benchmark harness** (`bench/`) comparing diadem to tsyringe, inversify,
+  typed-inject, and hand-wired code across bundle size, cold start, memory, and
+  scaling, plus a consolidated `RESULTS.md`.
+
 ## 0.1.0
 
 Initial release.

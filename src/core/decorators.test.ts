@@ -3,15 +3,26 @@ import {
   factory,
   getDIMetadata,
   getDIRegistrationStats,
+  getProviderMetadata,
   hasDIMetadata,
   isClassRegisteredForEnvironment,
   lazy,
   lazySingleton,
+  provider,
+  provides,
   singleton
 } from './decorators'
 
 abstract class IService {
   abstract run(): void
+}
+
+abstract class IConfig {
+  abstract get(k: string): string
+}
+
+abstract class IClient {
+  abstract send(): void
 }
 
 describe('decorators', () => {
@@ -89,5 +100,64 @@ describe('decorators', () => {
     expect(stats.singletons).toBe(1)
     expect(stats.factories).toBe(1)
     expect(stats.environments).toContain('test')
+  })
+
+  describe('providers', () => {
+    it('collects @provides bindings from a @provider class', () => {
+      @provider()
+      class Integrations {
+        @provides(IConfig)
+        config(): IConfig {
+          return { get: () => '' }
+        }
+        @provides(IClient, 'production')
+        client(): IClient {
+          return { send() {} }
+        }
+      }
+
+      const entries = getProviderMetadata(Integrations)
+      expect(entries).not.toBeNull()
+      expect(entries).toHaveLength(2)
+      const byMethod = Object.fromEntries(
+        (entries ?? []).map((e) => [e.method, e])
+      )
+      expect(byMethod.config.token).toBe(IConfig)
+      expect(byMethod.config.environment).toBeUndefined()
+      expect(byMethod.client.token).toBe(IClient)
+      expect(byMethod.client.environment).toBe('production')
+    })
+
+    it('returns null for a class that is not a @provider', () => {
+      class Plain {}
+      expect(getProviderMetadata(Plain)).toBeNull()
+    })
+
+    it('returns an empty list for a @provider with no @provides methods', () => {
+      @provider()
+      class Empty {}
+      expect(getProviderMetadata(Empty)).toEqual([])
+    })
+
+    it('keeps @provides bindings per-class (no cross-class leakage)', () => {
+      @provider()
+      class A {
+        @provides(IConfig)
+        config(): IConfig {
+          return { get: () => 'a' }
+        }
+      }
+      @provider()
+      class B {
+        @provides(IClient)
+        client(): IClient {
+          return { send() {} }
+        }
+      }
+      expect(getProviderMetadata(A)).toHaveLength(1)
+      expect(getProviderMetadata(B)).toHaveLength(1)
+      expect(getProviderMetadata(A)?.[0].token).toBe(IConfig)
+      expect(getProviderMetadata(B)?.[0].token).toBe(IClient)
+    })
   })
 })

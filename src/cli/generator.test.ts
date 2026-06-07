@@ -324,6 +324,110 @@ describe('manifest generator', () => {
     })
   })
 
+  describe('providers (@provides bindings)', () => {
+    function writeProviders(): void {
+      write(
+        'src/config.ts',
+        `import { singleton } from 'diadem'
+         export abstract class IConfig { abstract get(k: string): string }
+         @singleton(IConfig)
+         export class Config extends IConfig { get(k: string) { return '' } }`
+      )
+      write('src/sdk.ts', `export class StripeSdk {
+        constructor(private key: string) {}
+        charge() { return 'ok' }
+      }`)
+      write(
+        'src/providers.ts',
+        `import { provider, provides } from 'diadem'
+         import { IConfig } from './config'
+         import { StripeSdk } from './sdk'
+         @provider()
+         export class Integrations {
+           @provides(StripeSdk)
+           stripe(config: IConfig): StripeSdk { return new StripeSdk(config.get('KEY')) }
+         }`
+      )
+    }
+
+    it('wires a provider method as a factory call registered under its token', () => {
+      writeProviders()
+      const result = generateManifest(
+        loadConfig(root, { emit: 'compiled', outFile: 'src/generated/c.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+
+      expect(result.providerCount).toBe(1)
+      // Provider class instantiated once, method called with injected deps.
+      expect(code).toContain('const _provider_Integrations = new Integrations()')
+      expect(code).toContain('_provider_Integrations.stripe(_Config)')
+      // Registered under the token directly, not a synthetic class id.
+      expect(code).toContain('c.register(StripeSdk, _Integrations_stripe)')
+      // Provider class + token are imported as values.
+      expect(code).toMatch(/import \{ Integrations \} from '\.\.\/providers'/)
+    })
+
+    it('lets a service depend on a provider-bound token', () => {
+      writeProviders()
+      write(
+        'src/gateway.ts',
+        `import { singleton } from 'diadem'
+         import { StripeSdk } from './sdk'
+         export abstract class IGateway { abstract pay(): void }
+         @singleton(IGateway)
+         export class Gateway extends IGateway {
+           constructor(private sdk: StripeSdk) { super() }
+           pay() {}
+         }`
+      )
+      const result = generateManifest(
+        loadConfig(root, { emit: 'compiled', outFile: 'src/generated/c.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+
+      // The provided StripeSdk is injected — no requireExternal, no undefined.
+      expect(code).toContain('new Gateway(_Integrations_stripe)')
+      expect(code).not.toContain('requireExternal')
+      // Provider binding is emitted before the service that consumes it.
+      expect(code.indexOf('_Integrations_stripe =')).toBeLessThan(
+        code.indexOf('new Gateway(')
+      )
+    })
+
+    it('exposes provider tokens in the typed accessor surface', () => {
+      writeProviders()
+      const result = generateManifest(
+        loadConfig(root, { emit: 'compiled', outFile: 'src/generated/c.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+      expect(code).toContain('StripeSdk: StripeSdk')
+      expect(code).toContain('return container.resolve(StripeSdk)')
+    })
+
+    it('makes a provider binding overridable', () => {
+      writeProviders()
+      const result = generateManifest(
+        loadConfig(root, { emit: 'compiled', outFile: 'src/generated/c.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+      expect(code).toContain('StripeSdk?: StripeSdk')
+      expect(code).toContain('overrides.StripeSdk ?? _provider_Integrations.stripe')
+    })
+
+    it('skips provider bindings in manifest emit and reports a count', () => {
+      writeProviders()
+      const result = generateManifest(
+        loadConfig(root, { outFile: 'src/generated/manifest.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+
+      expect(result.providerCount).toBe(1)
+      // Synthetic provider entries never reach the runtime manifest.
+      expect(code).not.toContain('Integrations#stripe')
+      expect(code).not.toContain('_provider_')
+    })
+  })
+
   describe('graph visualizer', () => {
     it('writes an interactive HTML graph with nodes, edges, and externals', () => {
       write(

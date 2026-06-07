@@ -103,25 +103,6 @@ Among real DI containers, compiled mode is fastest to build: ~1.9× typed-inject
 ~3.3× tsyringe, ~52× inversify. diadem's **manifest** mode is slow to build (it
 interprets the manifest at runtime) — use manifest in dev/test, compiled in prod.
 
-### Hot resolve — *don't read too much into this*
-
-| framework | ops/sec | relative |
-| --- | ---: | ---: |
-| vanilla (hand-written) | 28,623,463 | 1.00× |
-| typed-inject | 27,254,693 | 0.95× |
-| diadem (compiled) | 25,886,143 | 0.90× |
-| diadem (manifest) | 23,463,229 | 0.82× |
-| tsyringe | 9,839,580 | 0.34× |
-| inversify | 1,871,105 | 0.07× |
-
-At ~25M ops/sec the measurement is dominated by call/loop overhead, not the
-lookup — in some runs hand-written wiring measures *slower* than a container,
-which is physically impossible and proves it's noise. The honest read: vanilla,
-typed-inject, and both diadem modes are **tied at the noise floor**; only the
-reflect-metadata containers (tsyringe ~2.6×, inversify ~14× slower) are
-distinguishable. Real apps resolve a handful of times at startup, not millions
-per second, so this metric rarely matters.
-
 ### Scaling — build time as the graph grows
 
 Build time for the whole container at 10 → 300 services (ms, lower is better).
