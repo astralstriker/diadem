@@ -37,6 +37,20 @@ TS runner, e.g.:
 npx tsx examples/basic.ts
 ```
 
+## `fastify/` — a production-shaped HTTP service
+
+A complete task API wired with Diadem: layered architecture
+(infrastructure / domain / http / routes), an `@asyncSingleton` database
+awaited before startup, one request scope per HTTP request feeding `@scoped`
+services, environment-baked metrics (`--target-env`), a container-owned pino
+logger shared with Fastify, graceful shutdown that disposes singletons in
+reverse order, and a socket-free test suite that swaps services through the
+generated `Overrides` seam. See `fastify/README.md` for the tour:
+
+```bash
+cd examples/fastify && npm install && npm test && npm run dev
+```
+
 ## Generator workflow (a real project)
 
 In an actual project you don't hand-write the manifest — you generate it.

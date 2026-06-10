@@ -1,0 +1,22 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:di": "diadem build --target-env development",
+    "build:di:prod": "diadem build --target-env production",
+    "dev": "npm run build:di && tsx watch src/server.ts",
+    "start": "node --import tsx src/server.ts",
+    "test": "npm run build:di && node --import tsx --test test/app.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@devcraft-ts/diadem": "file:../../",
+    "fastify": "^5.0.0",
+    "pino": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "scanDirs": ["src"],
+  "outFile": "src/generated/container.ts",
+  "emit": "compiled"
+}
