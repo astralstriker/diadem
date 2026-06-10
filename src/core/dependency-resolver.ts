@@ -238,7 +238,9 @@ export class EnhancedDependencyResolver {
     // Validate container methods
     if (
       typeof container.registerSingleton !== 'function' ||
-      typeof container.registerFactory !== 'function'
+      typeof container.registerFactory !== 'function' ||
+      typeof container.registerScoped !== 'function' ||
+      typeof container.registerMulti !== 'function'
     ) {
       getLogger().error(
         `❌ Container missing registration methods for ${ServiceClass.name}`
@@ -247,7 +249,7 @@ export class EnhancedDependencyResolver {
     }
 
     // Create factory function that resolves dependencies using manifest information
-    const createInstance = () => {
+    const createInstance = (resolvingContainer: DIContainer = container) => {
       const resolvedArgs: unknown[] = []
 
       // Resolve each dependency based on manifest information
@@ -281,7 +283,7 @@ export class EnhancedDependencyResolver {
             }
 
             // Resolve dependency from container
-            const resolvedDep = container.resolve(depMetadata.token)
+            const resolvedDep = resolvingContainer.resolve(depMetadata.token)
             resolvedArgs[dependency.paramIndex] = resolvedDep
           } else {
             // Unknown dependency type
@@ -320,13 +322,20 @@ export class EnhancedDependencyResolver {
     try {
       switch (manifestEntry.lifecycle) {
         case 'singleton':
-          container.registerSingleton(metadata.token, createInstance)
+          if (manifestEntry.multi) {
+            container.registerMulti(metadata.token, createInstance())
+          } else {
+            container.registerSingleton(metadata.token, createInstance)
+          }
           break
         case 'factory':
           container.registerFactory(metadata.token, createInstance)
           break
         case 'lazy':
           container.registerFactory(metadata.token, createInstance)
+          break
+        case 'scoped':
+          container.registerScoped(metadata.token, createInstance)
           break
         case 'lazySingleton': {
           // For lazy singletons, we need to use a factory that maintains its own singleton state

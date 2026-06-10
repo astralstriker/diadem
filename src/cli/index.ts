@@ -162,8 +162,10 @@ Options:
   --port <n>           graph: port for --serve (default 4321)
   --cwd <dir>          Project root. Default: current directory
   --fail-on-cycle      build: exit non-zero if a dependency cycle is detected
-  --strict             build: exit non-zero on cycles, ambiguous tokens, or required
-                       dependencies with no implementing service
+  --strict             build: exit non-zero on cycles, ambiguous tokens, captive
+                       scoped dependencies, multi-bound tokens injected as single
+                       parameters, or required dependencies with no implementing
+                       service
   -h, --help           Show this help
 
 A diadem.config.json in the project root is merged under CLI flags.
@@ -277,6 +279,21 @@ function buildOnce(config: DiademConfig, args: ParsedArgs): boolean {
       `diadem: warning — token ${token} is declared by more than one service (ambiguous)\n`
     )
   }
+  for (const captive of result.captiveDependencies) {
+    process.stderr.write(
+      `diadem: warning — ${captive.service} (${captive.serviceLifecycle}) injects scoped ` +
+        `${captive.dependency} (${captive.paramName}); the instance is captured once at ` +
+        `construction and shared across all request scopes. Make ${captive.service} scoped, ` +
+        `or resolve ${captive.dependency} from the request scope instead of injecting it\n`
+    )
+  }
+  for (const injection of result.multiInjections) {
+    process.stderr.write(
+      `diadem: warning — ${injection.service} injects multi-bound token ${injection.token} ` +
+        `(${injection.paramName}) as a single parameter; constructor injection cannot supply ` +
+        `multi-bindings — use container.resolveAll(${injection.token})\n`
+    )
+  }
   if (result.cycles.length > 0) {
     process.stderr.write(
       `diadem: warning — dependency cycle(s) detected: ${result.cycles.join(', ')}\n`
@@ -294,7 +311,10 @@ function buildOnce(config: DiademConfig, args: ParsedArgs): boolean {
     result.cycles.length > 0 && (args.strict || args.failOnCycle)
   const strictViolation =
     args.strict &&
-    (result.unresolved.length > 0 || result.duplicateTokens.length > 0)
+    (result.unresolved.length > 0 ||
+      result.duplicateTokens.length > 0 ||
+      result.captiveDependencies.length > 0 ||
+      result.multiInjections.length > 0)
   return cycleViolation || strictViolation
 }
 

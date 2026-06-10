@@ -14,6 +14,7 @@ import type { AbstractConstructor, ConcreteConstructor } from './types'
 const DI_TOKEN_KEY = Symbol('di:token')
 const DI_LIFECYCLE_KEY = Symbol('di:lifecycle')
 const DI_ENVIRONMENT_KEY = Symbol('di:environment')
+const DI_MULTI_KEY = Symbol('di:multi')
 const DI_PROVIDER_KEY = Symbol('di:provider')
 const DI_PROVIDES_KEY = Symbol('di:provides')
 
@@ -23,6 +24,7 @@ export type LifecycleType =
   | 'factory'
   | 'lazy'
   | 'lazySingleton'
+  | 'scoped'
   | 'asyncSingleton'
 
 // Metadata interface
@@ -30,6 +32,25 @@ export interface DIMetadata {
   token: AbstractConstructor
   lifecycle: LifecycleType
   environment?: string
+  multi?: boolean
+}
+
+export interface BindingOptions {
+  env?: string
+  environment?: string
+  multi?: boolean
+}
+
+function normalizeBindingOptions(
+  optionsOrEnv?: string | BindingOptions
+): { environment?: string; multi?: boolean } {
+  if (typeof optionsOrEnv === 'string') {
+    return { environment: optionsOrEnv }
+  }
+  return {
+    environment: optionsOrEnv?.environment ?? optionsOrEnv?.env,
+    multi: optionsOrEnv?.multi
+  }
 }
 
 /**
@@ -39,7 +60,8 @@ function setDIMetadata(
   target: ConcreteConstructor,
   token: AbstractConstructor,
   lifecycle: LifecycleType,
-  environment?: string
+  environment?: string,
+  multi?: boolean
 ): void {
   // Store metadata directly on the class constructor
   Object.defineProperty(target, DI_TOKEN_KEY, {
@@ -64,6 +86,15 @@ function setDIMetadata(
       configurable: false
     })
   }
+
+  if (multi) {
+    Object.defineProperty(target, DI_MULTI_KEY, {
+      value: true,
+      enumerable: false,
+      writable: false,
+      configurable: false
+    })
+  }
 }
 
 /**
@@ -74,6 +105,7 @@ export function getDIMetadata(target: ConcreteConstructor): DIMetadata | null {
   const token = store[DI_TOKEN_KEY] as AbstractConstructor | undefined
   const lifecycle = store[DI_LIFECYCLE_KEY] as LifecycleType | undefined
   const environment = store[DI_ENVIRONMENT_KEY] as string | undefined
+  const multi = store[DI_MULTI_KEY] as boolean | undefined
 
   if (!token || !lifecycle) {
     return null
@@ -82,7 +114,8 @@ export function getDIMetadata(target: ConcreteConstructor): DIMetadata | null {
   return {
     token,
     lifecycle,
-    environment
+    environment,
+    multi
   }
 }
 
@@ -113,9 +146,13 @@ export function hasDIMetadata(target: ConcreteConstructor): boolean {
  * }
  * ```
  */
-export function singleton<T>(token: AbstractConstructor<T>, env?: string) {
+export function singleton<T>(
+  token: AbstractConstructor<T>,
+  optionsOrEnv?: string | BindingOptions
+) {
   return function <U extends ConcreteConstructor<T>>(target: U): U {
-    setDIMetadata(target, token, 'singleton', env)
+    const { environment, multi } = normalizeBindingOptions(optionsOrEnv)
+    setDIMetadata(target, token, 'singleton', environment, multi)
     return target
   }
 }
@@ -187,6 +224,37 @@ export function lazySingleton<T>(token: AbstractConstructor<T>, env?: string) {
 }
 
 /**
+ * Decorator to register a class as scoped. A scoped service is constructed once
+ * per request scope and reused inside that scope. Application-level singletons
+ * are still shared with the request scope.
+ *
+ * @param token The interface/abstract class token to register against
+ * @param scope Scope name. Currently only `'request'` is supported.
+ * @param env Optional environment filter
+ *
+ * @example
+ * ```typescript
+ * @scoped(IRequestContext)
+ * class RequestContext implements IRequestContext {
+ *   // one instance per createRequestScope()
+ * }
+ * ```
+ */
+export function scoped<T>(
+  token: AbstractConstructor<T>,
+  scope: 'request' = 'request',
+  env?: string
+) {
+  return function <U extends ConcreteConstructor<T>>(target: U): U {
+    if (scope !== 'request') {
+      throw new Error(`Unsupported Diadem scope: ${scope}`)
+    }
+    setDIMetadata(target, token, 'scoped', env)
+    return target
+  }
+}
+
+/**
  * Decorator to register a class as an **async singleton**: an eager singleton
  * whose construction needs awaited setup (a DB pool, a secrets fetch). Pair it
  * with an `async onInit()` method — diadem constructs the instance, awaits
@@ -233,6 +301,7 @@ export function getDIRegistrationStats(classes: ConcreteConstructor[]): {
   factories: number
   lazy: number
   lazySingletons: number
+  scoped: number
   environments: string[]
 } {
   const stats = {
@@ -241,6 +310,7 @@ export function getDIRegistrationStats(classes: ConcreteConstructor[]): {
     factories: 0,
     lazy: 0,
     lazySingletons: 0,
+    scoped: 0,
     environments: new Set<string>()
   }
 
@@ -263,6 +333,9 @@ export function getDIRegistrationStats(classes: ConcreteConstructor[]): {
         break
       case 'lazySingleton':
         stats.lazySingletons++
+        break
+      case 'scoped':
+        stats.scoped++
         break
     }
 

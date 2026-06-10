@@ -35,6 +35,24 @@ describe('DiademContainer', () => {
     expect(c.resolve(IGreeter)).not.toBe(c.resolve(IGreeter))
   })
 
+  it('resolves all multi-bindings in registration order', () => {
+    class LoudGreeter extends IGreeter {
+      greet(): string {
+        return 'HI'
+      }
+    }
+
+    const c = new DiademContainer()
+    const quiet = new Greeter()
+    const loud = new LoudGreeter()
+    c.registerMulti(IGreeter, quiet)
+    c.registerMulti(IGreeter, loud)
+
+    expect(c.resolveAll(IGreeter)).toEqual([quiet, loud])
+    expect(c.resolveAll(ICounter)).toEqual([])
+    expect(c.has(IGreeter)).toBe(true)
+  })
+
   it('throws a helpful error for an unregistered token', () => {
     const c = new DiademContainer()
     expect(() => c.resolve(IGreeter)).toThrowError(/Dependency not found: IGreeter/)
@@ -72,14 +90,58 @@ describe('DiademContainer', () => {
     expect(child.resolve(IGreeter)).toBe(greeter)
   })
 
+  it('caches scoped services per request scope', () => {
+    const parent = new DiademContainer()
+    let made = 0
+    parent.registerScoped(ICounter, () => ({
+      next: () => ++made
+    }))
+
+    const requestA = parent.createRequestScope()
+    const requestB = parent.createRequestScope()
+
+    expect(requestA.resolve(ICounter)).toBe(requestA.resolve(ICounter))
+    expect(requestB.resolve(ICounter)).toBe(requestB.resolve(ICounter))
+    expect(requestA.resolve(ICounter)).not.toBe(requestB.resolve(ICounter))
+  })
+
+  it('does not inherit scoped instances already resolved by the parent', () => {
+    const parent = new DiademContainer()
+    parent.registerScoped(ICounter, () => ({ next: () => 1 }))
+
+    const rootScoped = parent.resolve(ICounter)
+    const request = parent.createRequestScope()
+
+    expect(request.resolve(ICounter)).not.toBe(rootScoped)
+  })
+
+  it('resolves scoped dependencies from the active request scope', () => {
+    abstract class IUsesCounter {
+      abstract counter: ICounter
+    }
+
+    const parent = new DiademContainer()
+    parent.registerScoped(ICounter, () => ({ next: () => 1 }))
+    parent.registerScoped(IUsesCounter, (scope) => ({
+      counter: scope.resolve(ICounter)
+    }))
+
+    const request = parent.createRequestScope()
+    expect(request.resolve(IUsesCounter).counter).toBe(request.resolve(ICounter))
+  })
+
   it('reports diagnostics counts', () => {
     const c = new DiademContainer()
     c.register(IGreeter, new Greeter())
     c.registerSingleton(ICounter, () => ({ next: () => 1 }))
+    c.registerScoped(IGreeter, () => new Greeter())
+    c.registerMulti(ICounter, { next: () => 2 })
     const d = c.getDiagnostics()
     expect(d.dependencies).toBe(1)
     expect(d.singletons).toBe(1)
     expect(d.factories).toBe(0)
+    expect(d.scopedFactories).toBe(1)
+    expect(d.multiBindings).toBe(1)
     expect(d.asyncFactories).toBe(0)
   })
 })

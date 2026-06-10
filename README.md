@@ -15,7 +15,7 @@
                                                       ──►  dependency graph  ──┘
 ```
 
-> **Status:** Production-ready DI foundation (v0.2.1) with build-time cycle detection, async lifecycle hooks, and provider bindings. Architectural insights in active development. The runtime container, decorators, dependency resolver, **`diadem build` manifest generator**, and **`diadem graph` visualizer** are all in place. See [DIADEM_VISION.md](DIADEM_VISION.md) for the architectural intelligence roadmap.
+> **Status:** Production-ready DI foundation (v0.3) with request scopes, multi-binding, build-time cycle and scope-safety diagnostics, async lifecycle hooks, and provider bindings. Architectural insights in active development. The runtime container, decorators, dependency resolver, **`diadem build` manifest generator**, and **`diadem graph` visualizer** are all in place. See [DIADEM_VISION.md](DIADEM_VISION.md) for the architectural intelligence roadmap.
 
 ## Install
 
@@ -133,7 +133,10 @@ wired into `createContainer()`.)
 This metadata becomes the foundation for architectural analysis: detecting cycles, measuring coupling, identifying hotspots, and enforcing boundaries.
 - One environment is **baked in** per build (`--target-env`, default: all) — no
   runtime env branching.
-- `lazySingleton` is treated as **eager** (its instance is referenced up front).
+- `lazySingleton` is registered up front but constructed only on first resolve,
+  then cached. Note that laziness holds only while nothing eager depends on it:
+  constructor injection forces construction, so an eager singleton that injects
+  a `lazySingleton` materializes it at container creation.
 
 ### Providing externals & mocking (overrides)
 
@@ -240,15 +243,56 @@ The dependency graph reveals what's already happening in your code — patterns 
 | Concept | What it is |
 | --- | --- |
 | **Token** | An abstract class used as the injection key. |
-| **Decorator** | `@singleton` / `@factory` / `@lazy` / `@lazySingleton` tag an implementation with its token, lifecycle, and optional environment. |
+| **Decorator** | `@singleton` / `@factory` / `@lazy` / `@lazySingleton` / `@scoped` tag an implementation with its token, lifecycle, and optional environment. |
 | **Manifest** | Build-time output describing every service, its dependencies, and a topological registration order. Conforms to `ServiceManifestModule`. |
-| **Container** | `DiademContainer` — reads the manifest and resolves instances. Usually app-scoped; `createChild()` makes an isolated scope when needed. |
+| **Container** | `DiademContainer` — reads the manifest and resolves instances. Usually app-scoped; `createRequestScope()` makes an isolated request scope when needed. |
 
 ### Lifecycles
 
 - `singleton` — one instance per container, created eagerly on registration.
 - `lazySingleton` — one instance per container, created on first resolve.
+- `scoped` — one instance per request scope, created on first resolve within that scope.
 - `lazy` / `factory` — a new instance on every resolve.
+
+### Request scope
+
+Use `@scoped(Token)` for per-request state such as request context, auth
+principal, correlation IDs, or unit-of-work objects. Create one request scope
+from the application container and dispose it when the request finishes:
+
+```ts
+@scoped(IRequestContext)
+export class RequestContext extends IRequestContext {}
+
+const app = createContainer()
+const request = app.createRequestScope()
+const context = request.resolve(IRequestContext)
+await request.dispose()
+```
+
+Scoped services may inject singletons, but not the other way around: a
+singleton that injects a scoped service captures one instance at construction
+and shares it across every request (a *captive dependency*). The generator
+warns when it sees this, and `--strict` fails the build.
+
+### Multi-binding
+
+Use multi-binding when several implementations intentionally share one token,
+such as plugin, middleware, or handler lists:
+
+```ts
+@singleton(IPlugin, { multi: true })
+export class AuditPlugin extends IPlugin {}
+
+@singleton(IPlugin, { multi: true })
+export class MetricsPlugin extends IPlugin {}
+
+const plugins = container.resolveAll(IPlugin)
+```
+
+Multi-bound tokens are retrieved with `resolveAll`, never injected as a single
+constructor parameter — the generator warns if a service tries, and `--strict`
+fails the build.
 
 ## Quick start
 
@@ -397,10 +441,10 @@ Diadem is evolving toward an **Architectural Intelligence Platform**. The DI con
 
 - **Layer 1 — Runtime foundation** (current) — production-ready DI, lifecycle management, async init, provider bindings
 - **Layer 2 — Canonical graph** (parallel) — service graph generation, module boundaries, metadata extraction
-- **Layer 3 — Architectural insights** (planned) — cycle detection, coupling metrics, boundary enforcement, health scoring
+- **Layer 3 — Architectural insights** (started) — cycle detection and scope-safety diagnostics ship today in `diadem build --strict`; coupling metrics, boundary enforcement, and health scoring to come
 - **Layer 4 — Ecosystem** (future) — VS Code extension, CI/CD checks, dashboards, documentation generators
 
-### Immediate roadmap (v0.2.x → v0.3)
+### Shipped (v0.2.x → v0.3)
 
 **v0.2.x** — Runtime foundation maturity
 1. ✅ `diadem build --watch` *(0.2.0)*.
@@ -408,15 +452,30 @@ Diadem is evolving toward an **Architectural Intelligence Platform**. The DI con
 3. ✅ **Async services** — `@asyncSingleton` + `createContainerAsync`, `onInit` lifecycle hook *(0.2.1)*.
 
 **v0.3** — Architectural expressiveness
-4. **Multi-binding** — `@singleton(IPlugin, { multi: true })` + `resolveAll` for plugin architectures.
-5. True lazy in compiled mode (honor `lazySingleton` instead of eager).
-6. Managed **request scope** — `@scoped('request')` + `createRequestScope()`.
+4. ✅ Managed **request scope** — `@scoped(IRequestContext)` + `createRequestScope()`.
+5. ✅ True lazy in compiled mode (honor `lazySingleton` instead of eager).
+6. ✅ **Multi-binding** — `@singleton(IPlugin, { multi: true })` + `resolveAll` for plugin architectures.
 
-### Future (v0.4+)
+### v0.4 — Canonical graph (Layer 2)
 
-7. Framework adapters (Express/Fastify per-request scope, React provider).
-8. **Modules & encapsulation** — private providers, bounded contexts.
-9. Graph export formats (JSON/GraphQL) for tooling integration.
+With the runtime foundation complete, the graph becomes the product:
+
+7. **Graph as a stable artifact** — `diadem graph --emit json` with a versioned schema (services, lifecycles, environments, edges, externals), so tools can consume the architecture model without parsing TypeScript.
+8. **Modules & boundaries** — declare bounded contexts with private providers and an explicit public surface; the graph records every edge that crosses a boundary.
+9. **Architecture APIs** — a programmatic `analyzeGraph()` entry point (the CLI already uses it internally) for custom tooling.
+
+### v0.5 — Architectural insights (Layer 3)
+
+Analysis on top of the canonical graph. Cycle detection and the scope-safety diagnostics (captive scoped dependencies, multi-binding misuse, env-ambiguous tokens) already ship in `diadem build --strict` — this layer generalizes them:
+
+10. **Boundary enforcement** — fail the build when an edge violates a declared module boundary.
+11. **Coupling & health metrics** — afferent/efferent coupling, instability, and hotspot scoring per module, with CI-friendly output.
+12. **Drift detection** — diff two graph artifacts (main vs. PR) and report new cycles, new boundary crossings, and removed seams.
+
+### Layer 4 & runtime conveniences (future)
+
+13. Framework adapters (Express/Fastify per-request scope, React provider).
+14. VS Code extension, CI/CD checks, dashboards, documentation generators — consumers of the Layer 2 graph.
 
 **Later / optional:** Named/qualified bindings, circular-dependency escape, property/setter injection, type-driven `--strict`, unused-service detection, offline graph viewer.
 

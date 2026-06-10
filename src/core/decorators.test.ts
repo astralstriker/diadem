@@ -10,6 +10,7 @@ import {
   lazySingleton,
   provider,
   provides,
+  scoped,
   singleton
 } from './decorators'
 
@@ -51,9 +52,14 @@ describe('decorators', () => {
     class LS extends IService {
       run() {}
     }
+    @scoped(IService)
+    class RequestScoped extends IService {
+      run() {}
+    }
     expect(getDIMetadata(F)?.lifecycle).toBe('factory')
     expect(getDIMetadata(L)?.lifecycle).toBe('lazy')
     expect(getDIMetadata(LS)?.lifecycle).toBe('lazySingleton')
+    expect(getDIMetadata(RequestScoped)?.lifecycle).toBe('scoped')
   })
 
   it('captures an environment filter', () => {
@@ -64,6 +70,18 @@ describe('decorators', () => {
     expect(getDIMetadata(P)?.environment).toBe('production')
     expect(isClassRegisteredForEnvironment(P, 'production')).toBe(true)
     expect(isClassRegisteredForEnvironment(P, 'development')).toBe(false)
+  })
+
+  it('captures singleton binding options', () => {
+    @singleton(IService, { multi: true, env: 'test' })
+    class Plugin extends IService {
+      run() {}
+    }
+
+    const meta = getDIMetadata(Plugin)
+    expect(meta?.lifecycle).toBe('singleton')
+    expect(meta?.multi).toBe(true)
+    expect(meta?.environment).toBe('test')
   })
 
   it('treats env-less classes as available everywhere', () => {
@@ -95,10 +113,15 @@ describe('decorators', () => {
     class B extends IService {
       run() {}
     }
-    const stats = getDIRegistrationStats([A, B])
-    expect(stats.total).toBe(2)
+    @scoped(IService)
+    class C extends IService {
+      run() {}
+    }
+    const stats = getDIRegistrationStats([A, B, C])
+    expect(stats.total).toBe(3)
     expect(stats.singletons).toBe(1)
     expect(stats.factories).toBe(1)
+    expect(stats.scoped).toBe(1)
     expect(stats.environments).toContain('test')
   })
 

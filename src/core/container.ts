@@ -13,7 +13,12 @@ export type Constructor<T> = abstract new (...args: any[]) => T
 export type Token<T> = Constructor<T>
 
 // Lifecycle types for auto-registration
-export type LifecycleType = 'singleton' | 'factory' | 'lazy' | 'lazySingleton'
+export type LifecycleType =
+  | 'singleton'
+  | 'factory'
+  | 'lazy'
+  | 'lazySingleton'
+  | 'scoped'
 
 /**
  * A resource that can be released when its owning container is disposed.
@@ -46,9 +51,12 @@ function isDisposable(value: unknown): value is Disposable {
 export interface DIContainer {
   register: <T>(token: Token<T>, implementation: T) => void
   resolve: <T>(token: Token<T>) => T
+  resolveAll: <T>(token: Token<T>) => T[]
   resolveAsync: <T>(token: Token<T>) => Promise<T>
   registerSingleton: <T>(token: Token<T>, factory: () => T) => void
   registerFactory: <T>(token: Token<T>, factory: () => T) => void
+  registerScoped: <T>(token: Token<T>, factory: (scope: DIContainer) => T) => void
+  registerMulti: <T>(token: Token<T>, implementation: T) => void
   registerAsyncFactory: <T>(token: Token<T>, factory: () => Promise<T>) => void
   registerAsyncSingleton: <T>(token: Token<T>, factory: () => Promise<T>) => void
   autoDiscover: (
@@ -60,6 +68,8 @@ export interface DIContainer {
     dependencies: number
     singletons: number
     factories: number
+    scopedFactories: number
+    multiBindings: number
     asyncFactories: number
     isReady: boolean
   }
@@ -104,6 +114,12 @@ class DiademContainer implements DIContainer {
   private readonly dependencies = new Map<Constructor<unknown>, unknown>()
   public readonly singletons = new Map<Constructor<unknown>, unknown>()
   public readonly factories = new Map<Constructor<unknown>, () => unknown>()
+  private readonly scopedInstances = new Map<Constructor<unknown>, unknown>()
+  private readonly multiBindings = new Map<Constructor<unknown>, unknown[]>()
+  public readonly scopedFactories = new Map<
+    Constructor<unknown>,
+    (scope: DIContainer) => unknown
+  >()
   public readonly asyncFactories = new Map<
     Constructor<unknown>,
     () => Promise<unknown>
@@ -130,6 +146,33 @@ class DiademContainer implements DIContainer {
    */
   registerFactory<T>(token: Constructor<T>, factory: () => T): void {
     this.factories.set(token, factory)
+  }
+
+  /**
+   * Register a scoped factory. The factory runs once per container instance and
+   * the result is cached in that container. Child/request scopes inherit the
+   * factory but not the cached instance, so each scope gets its own object.
+   * @param token Dependency token
+   * @param factory Factory function
+   */
+  registerScoped<T>(
+    token: Constructor<T>,
+    factory: (scope: DIContainer) => T
+  ): void {
+    this.scopedFactories.set(token, factory)
+  }
+
+  /**
+   * Register one contribution to a multi-binding token. Use
+   * {@link resolveAll} to retrieve every contribution in registration order.
+   * @param token Dependency token
+   * @param implementation Implementation instance
+   */
+  registerMulti<T>(token: Constructor<T>, implementation: T): void {
+    const existing = this.multiBindings.get(token) ?? []
+    existing.push(implementation)
+    this.multiBindings.set(token, existing)
+    this.trackDisposable(implementation)
   }
 
   /**
@@ -217,9 +260,22 @@ class DiademContainer implements DIContainer {
       return singleton as T
     }
 
+    const scopedInstance = this.scopedInstances.get(token)
+    if (scopedInstance !== undefined) {
+      return scopedInstance as T
+    }
+
     const factory = this.factories.get(token)
     if (factory !== undefined) {
       return factory() as T
+    }
+
+    const scopedFactory = this.scopedFactories.get(token)
+    if (scopedFactory !== undefined) {
+      const instance = scopedFactory(this)
+      this.scopedInstances.set(token, instance)
+      this.trackDisposable(instance)
+      return instance as T
     }
 
     // Registered, but only as an async factory.
@@ -250,6 +306,18 @@ class DiademContainer implements DIContainer {
   }
 
   /**
+   * Resolve every implementation registered for a multi-binding token.
+   * @param token Dependency token
+   * @returns Registered implementations in registration order
+   */
+  resolveAll<T>(token: Constructor<T>): T[] {
+    if (!token) {
+      throw new Error('Dependency token is undefined or null')
+    }
+    return [...((this.multiBindings.get(token) as T[] | undefined) ?? [])]
+  }
+
+  /**
    * Resolve a dependency that may have been registered asynchronously.
    * Synchronous registrations resolve immediately; async factories/singletons
    * are awaited.
@@ -265,7 +333,9 @@ class DiademContainer implements DIContainer {
     if (
       this.dependencies.has(token) ||
       this.singletons.has(token) ||
-      this.factories.has(token)
+      this.scopedInstances.has(token) ||
+      this.factories.has(token) ||
+      this.scopedFactories.has(token)
     ) {
       return this.resolve(token)
     }
@@ -299,6 +369,9 @@ class DiademContainer implements DIContainer {
     this.dependencies.clear()
     this.singletons.clear()
     this.factories.clear()
+    this.scopedInstances.clear()
+    this.scopedFactories.clear()
+    this.multiBindings.clear()
     this.asyncFactories.clear()
     this.disposers.length = 0
     this.ready = false
@@ -349,6 +422,8 @@ class DiademContainer implements DIContainer {
     dependencies: number
     singletons: number
     factories: number
+    scopedFactories: number
+    multiBindings: number
     asyncFactories: number
     isReady: boolean
   } {
@@ -356,6 +431,11 @@ class DiademContainer implements DIContainer {
       dependencies: this.dependencies.size,
       singletons: this.singletons.size,
       factories: this.factories.size,
+      scopedFactories: this.scopedFactories.size,
+      multiBindings: Array.from(this.multiBindings.values()).reduce(
+        (sum, bindings) => sum + bindings.length,
+        0
+      ),
       asyncFactories: this.asyncFactories.size,
       isReady: this.ready
     }
@@ -373,7 +453,10 @@ class DiademContainer implements DIContainer {
     return (
       this.dependencies.has(token) ||
       this.singletons.has(token) ||
+      this.scopedInstances.has(token) ||
+      this.multiBindings.has(token) ||
       this.factories.has(token) ||
+      this.scopedFactories.has(token) ||
       this.asyncFactories.has(token)
     )
   }
@@ -387,6 +470,8 @@ class DiademContainer implements DIContainer {
     this.dependencies.forEach((_, token) => tokens.add(token))
     this.singletons.forEach((_, token) => tokens.add(token))
     this.factories.forEach((_, token) => tokens.add(token))
+    this.scopedFactories.forEach((_, token) => tokens.add(token))
+    this.multiBindings.forEach((_, token) => tokens.add(token))
     this.asyncFactories.forEach((_, token) => tokens.add(token))
 
     return Array.from(tokens)
@@ -418,11 +503,29 @@ class DiademContainer implements DIContainer {
       child.factories.set(token, factory)
     })
 
+    this.scopedFactories.forEach((factory, token) => {
+      child.scopedFactories.set(token, factory)
+    })
+
+    this.multiBindings.forEach((bindings, token) => {
+      child.multiBindings.set(token, [...bindings])
+    })
+
     this.asyncFactories.forEach((factory, token) => {
       child.asyncFactories.set(token, factory)
     })
 
     return child
+  }
+
+  /**
+   * Create a named request scope. This is intentionally the same isolation
+   * model as {@link createChild}: parent singletons are shared, scoped services
+   * are recreated and cached inside the request container, and disposing the
+   * request never tears down parent-owned resources.
+   */
+  createRequestScope(): DiademContainer {
+    return this.createChild()
   }
 
   /**

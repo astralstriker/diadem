@@ -99,6 +99,103 @@ describe('manifest generator', () => {
     expect(result.unresolved).toHaveLength(0)
   })
 
+  it('flags a non-scoped service injecting a scoped one as captive', () => {
+    write(
+      'src/captive.ts',
+      `import { singleton, scoped } from 'diadem'
+       export abstract class ICtx { abstract id(): string }
+       @scoped(ICtx)
+       export class Ctx extends ICtx { id() { return 'x' } }
+       export abstract class ICache { abstract get(): string }
+       @singleton(ICache)
+       export class Cache extends ICache {
+         constructor(private readonly ctx: ICtx) { super() }
+         get() { return this.ctx.id() }
+       }`
+    )
+    const result = generateManifest(loadConfig(root))
+    expect(result.captiveDependencies).toEqual([
+      {
+        service: 'Cache',
+        serviceLifecycle: 'singleton',
+        paramName: 'ctx',
+        dependency: 'ICtx'
+      }
+    ])
+  })
+
+  it('does not flag scoped services injecting scoped services', () => {
+    write(
+      'src/scoped-chain.ts',
+      `import { scoped } from 'diadem'
+       export abstract class ICtx { abstract id(): string }
+       @scoped(ICtx)
+       export class Ctx extends ICtx { id() { return 'x' } }
+       export abstract class IAudit { abstract log(): void }
+       @scoped(IAudit)
+       export class Audit extends IAudit {
+         constructor(private readonly ctx: ICtx) { super() }
+         log() {}
+       }`
+    )
+    const result = generateManifest(loadConfig(root))
+    expect(result.captiveDependencies).toHaveLength(0)
+  })
+
+  it('flags a multi-bound token injected as a single parameter', () => {
+    write(
+      'src/multi-inject.ts',
+      `import { singleton } from 'diadem'
+       export abstract class IPlugin { abstract run(): void }
+       @singleton(IPlugin, { multi: true })
+       export class A extends IPlugin { run() {} }
+       @singleton(IPlugin, { multi: true })
+       export class B extends IPlugin { run() {} }
+       export abstract class IHost { abstract go(): void }
+       @singleton(IHost)
+       export class Host extends IHost {
+         constructor(private readonly plugin: IPlugin) { super() }
+         go() {}
+       }`
+    )
+    const result = generateManifest(loadConfig(root))
+    expect(result.multiInjections).toEqual([
+      { service: 'Host', paramName: 'plugin', token: 'IPlugin' }
+    ])
+  })
+
+  it('resolves env-split tokens to the target-env impl without an ambiguity warning', () => {
+    write(
+      'src/metrics.ts',
+      `import { singleton } from 'diadem'
+       export abstract class IMetrics { abstract inc(): void }
+       @singleton(IMetrics, 'development')
+       export class DevMetrics extends IMetrics { inc() {} }
+       @singleton(IMetrics, 'production')
+       export class ProdMetrics extends IMetrics { inc() {} }
+       export abstract class IApp { abstract go(): void }
+       @singleton(IApp)
+       export class App extends IApp {
+         constructor(private readonly metrics: IMetrics) { super() }
+         go() {}
+       }`
+    )
+    const result = generateManifest(
+      loadConfig(root, {
+        emit: 'compiled',
+        outFile: 'src/generated/c.ts',
+        targetEnv: 'production'
+      })
+    )
+    // One impl per environment is the supported pattern, not a collision...
+    expect(result.duplicateTokens).toHaveLength(0)
+    // ...and dependents are wired to the impl that survives the env filter,
+    // not silently to nothing because the first-seen impl was filtered out.
+    const code = readFileSync(result.outFile, 'utf8')
+    expect(code).toContain('new App(_ProdMetrics)')
+    expect(code).not.toContain('new App()')
+  })
+
   it('flags ambiguous (duplicate) tokens', () => {
     write(
       'src/a.ts',
@@ -116,6 +213,42 @@ describe('manifest generator', () => {
     )
     const result = generateManifest(loadConfig(root))
     expect(result.duplicateTokens).toContain('IThing')
+  })
+
+  it('captures request-scoped services in the manifest', () => {
+    write(
+      'src/request.ts',
+      `import { scoped } from 'diadem'
+       export abstract class IRequestContext { abstract id(): string }
+       @scoped(IRequestContext, 'request', 'production')
+       export class RequestContext extends IRequestContext { id() { return 'r1' } }`
+    )
+
+    const result = generateManifest(loadConfig(root))
+    const manifest = readFileSync(result.outFile, 'utf8')
+
+    expect(result.serviceCount).toBe(1)
+    expect(manifest).toContain('"lifecycle": "scoped"')
+    expect(manifest).toContain('"environment": "production"')
+  })
+
+  it('captures multi-binding services in the manifest without duplicate warnings', () => {
+    write(
+      'src/plugins.ts',
+      `import { singleton } from 'diadem'
+       export abstract class IPlugin { abstract run(): string }
+       @singleton(IPlugin, { multi: true })
+       export class AlphaPlugin extends IPlugin { run() { return 'a' } }
+       @singleton(IPlugin, { multi: true })
+       export class BetaPlugin extends IPlugin { run() { return 'b' } }`
+    )
+
+    const result = generateManifest(loadConfig(root))
+    const manifest = readFileSync(result.outFile, 'utf8')
+
+    expect(result.serviceCount).toBe(2)
+    expect(result.duplicateTokens).toHaveLength(0)
+    expect(manifest).toContain('"multi": true')
   })
 
   it('detects dependency cycles', () => {
@@ -321,6 +454,116 @@ describe('manifest generator', () => {
       // Threaded through both entry points.
       expect(code).toContain('createContainer(overrides: Overrides = {})')
       expect(code).toContain('createServices(overrides: Overrides = {})')
+    })
+
+    it('types onInit against the implementation when the service is overridable', () => {
+      write(
+        'src/db.ts',
+        `import { asyncSingleton } from 'diadem'
+         export abstract class IDatabase { abstract ping(): Promise<boolean> }
+         @asyncSingleton(IDatabase)
+         export class Database extends IDatabase {
+           async onInit() {}
+           async ping() { return true }
+         }`
+      )
+      const result = generateManifest(
+        loadConfig(root, { emit: 'compiled', outFile: 'src/generated/c.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+      // The override branch never calls onInit; the constructed branch calls it
+      // on a local typed as the impl class — the token type (IDatabase) does
+      // not declare onInit, so calling it on the ?? union would not typecheck.
+      expect(code).toContain('let _Database: IDatabase')
+      expect(code).toContain('_Database = overrides.IDatabase')
+      expect(code).toContain('const instance = new Database()')
+      expect(code).toContain('await instance.onInit()')
+      expect(code).not.toContain('_Database.onInit()')
+    })
+
+    it('emits request-scoped services as scope-local factories', () => {
+      write(
+        'src/request.ts',
+        `import { scoped } from 'diadem'
+         export abstract class IRequestContext { abstract id(): string }
+         @scoped(IRequestContext)
+         export class RequestContext extends IRequestContext { id() { return 'r1' } }`
+      )
+      write(
+        'src/handler.ts',
+        `import { scoped } from 'diadem'
+         import { IRequestContext } from './request'
+         export abstract class IRequestHandler { abstract ctx(): IRequestContext }
+         @scoped(IRequestHandler)
+         export class RequestHandler extends IRequestHandler {
+           constructor(private request: IRequestContext) { super() }
+           ctx() { return this.request }
+         }`
+      )
+      const result = generateManifest(
+        loadConfig(root, { emit: 'compiled', outFile: 'src/generated/c.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+
+      expect(code).toContain(
+        'c.registerScoped(token(RequestContext), (scope) => new RequestContext())'
+      )
+      expect(code).toContain(
+        'c.registerScoped(token(RequestHandler), (scope) => new RequestHandler(scope.resolve(token(RequestContext))))'
+      )
+      expect(code).not.toContain('const _RequestContext = new RequestContext()')
+    })
+
+    it('emits lazy singletons as deferred cached factories', () => {
+      write(
+        'src/database.ts',
+        `import { lazySingleton } from 'diadem'
+         export abstract class IDatabase { abstract query(): string }
+         @lazySingleton(IDatabase)
+         export class Database extends IDatabase { query() { return 'ok' } }`
+      )
+      write(
+        'src/repo.ts',
+        `import { singleton } from 'diadem'
+         import { IDatabase } from './database'
+         export abstract class IRepository { abstract get(): string }
+         @singleton(IRepository)
+         export class Repository extends IRepository {
+           constructor(private db: IDatabase) { super() }
+           get() { return this.db.query() }
+         }`
+      )
+      const result = generateManifest(
+        loadConfig(root, { emit: 'compiled', outFile: 'src/generated/c.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+
+      expect(code).toContain('let _Database: Database | undefined')
+      expect(code).toContain('c.registerFactory(token(Database), () => {')
+      expect(code).toContain('_Database ??= new Database()')
+      expect(code).toContain('new Repository(c.resolve(token(Database)))')
+      expect(code).not.toContain('const _Database = new Database()')
+    })
+
+    it('emits multi-bindings with registerMulti and excludes them from single accessors', () => {
+      write(
+        'src/plugins.ts',
+        `import { singleton } from 'diadem'
+         export abstract class IPlugin { abstract run(): string }
+         @singleton(IPlugin, { multi: true })
+         export class AlphaPlugin extends IPlugin { run() { return 'a' } }
+         @singleton(IPlugin, { multi: true })
+         export class BetaPlugin extends IPlugin { run() { return 'b' } }`
+      )
+      const result = generateManifest(
+        loadConfig(root, { emit: 'compiled', outFile: 'src/generated/c.ts' })
+      )
+      const code = readFileSync(result.outFile, 'utf8')
+
+      expect(code).toContain('c.registerMulti(token(AlphaPlugin), _AlphaPlugin)')
+      expect(code).toContain('c.registerMulti(token(BetaPlugin), _BetaPlugin)')
+      expect(code).not.toContain('IPlugin: IPlugin')
+      expect(result.duplicateTokens).toHaveLength(0)
     })
   })
 

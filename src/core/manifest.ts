@@ -39,8 +39,15 @@ export interface ServiceDependency {
 export interface ServiceManifestEntry {
   className: string
   importPath: string
-  lifecycle: 'dependency' | 'singleton' | 'factory' | 'lazy' | 'lazySingleton'
+  lifecycle:
+    | 'dependency'
+    | 'singleton'
+    | 'factory'
+    | 'lazy'
+    | 'lazySingleton'
+    | 'scoped'
   environment?: string
+  multi?: boolean
   exported: boolean
   filePath: string
   registrationOrder: number

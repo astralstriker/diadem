@@ -20,6 +20,7 @@ import {
   factory,
   lazy,
   lazySingleton,
+  scoped,
   singleton
 } from './decorators'
 
@@ -46,7 +47,9 @@ export {
   lazySingleton,
   provider,
   provides,
+  scoped,
   singleton,
+  type BindingOptions,
   type LifecycleType as DecoratorLifecycleType,
   type DIMetadata,
   type ProvidesEntry
@@ -81,7 +84,8 @@ export const decorators = {
   factory,
   lazy,
   lazySingleton,
-  asyncSingleton
+  asyncSingleton,
+  scoped
 } as const
 
 /**
@@ -120,6 +124,11 @@ export interface ContainerBuilder {
     token: Constructor<T>,
     factory: ServiceFactory<T>
   ) => ContainerBuilder
+  registerScoped: <T>(
+    token: Constructor<T>,
+    factory: (scope: DIContainer) => T
+  ) => ContainerBuilder
+  registerMulti: <T>(token: Constructor<T>, implementation: T) => ContainerBuilder
   build: () => DiademContainer
 }
 
@@ -141,6 +150,17 @@ export function createContainerBuilder(): ContainerBuilder {
     },
     registerFactory: <T>(token: Constructor<T>, factory: ServiceFactory<T>) => {
       container.registerFactory(token, factory)
+      return builder
+    },
+    registerScoped: <T>(
+      token: Constructor<T>,
+      factory: (scope: DIContainer) => T
+    ) => {
+      container.registerScoped(token, factory)
+      return builder
+    },
+    registerMulti: <T>(token: Constructor<T>, implementation: T) => {
+      container.registerMulti(token, implementation)
       return builder
     },
 

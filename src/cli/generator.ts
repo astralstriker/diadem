@@ -22,6 +22,7 @@ type Lifecycle =
   | 'factory'
   | 'lazy'
   | 'lazySingleton'
+  | 'scoped'
   | 'asyncSingleton'
 
 const LIFECYCLE_BY_DECORATOR: Record<string, Lifecycle> = {
@@ -29,6 +30,7 @@ const LIFECYCLE_BY_DECORATOR: Record<string, Lifecycle> = {
   factory: 'factory',
   lazy: 'lazy',
   lazySingleton: 'lazySingleton',
+  scoped: 'scoped',
   asyncSingleton: 'asyncSingleton',
   injectable: 'dependency'
 }
@@ -58,6 +60,7 @@ interface ServiceInfo {
   className: string
   lifecycle: Lifecycle
   environment?: string
+  multi?: boolean
   token?: string
   tokenExported: boolean
   /** Resolved import source of the token, for the typed accessor surface. */
@@ -85,6 +88,29 @@ export interface UnresolvedDependency {
   typeName: string
 }
 
+/**
+ * A longer-lived service injecting a scoped one. The scoped instance is
+ * resolved once when the dependent is constructed — from the parent container,
+ * not from each request scope — so every request silently shares it.
+ */
+export interface CaptiveDependency {
+  service: string
+  serviceLifecycle: Lifecycle
+  paramName: string
+  dependency: string
+}
+
+/**
+ * A multi-bound token injected as a single constructor parameter. Constructor
+ * injection cannot supply multi-bindings; they must be fetched with
+ * `container.resolveAll(Token)`.
+ */
+export interface MultiInjection {
+  service: string
+  paramName: string
+  token: string
+}
+
 export interface GenerateResult {
   outFile: string
   serviceCount: number
@@ -105,6 +131,10 @@ export interface GenerateResult {
    * `--emit=compiled` to fully support async initialization.
    */
   asyncCount: number
+  /** Non-scoped services injecting scoped ones (scope violations). */
+  captiveDependencies: CaptiveDependency[]
+  /** Multi-bound tokens injected as single constructor parameters. */
+  multiInjections: MultiInjection[]
 }
 
 const PRIMITIVE_TYPES = new Set([
@@ -141,7 +171,10 @@ function analyzeGraph(config: DiademConfig): {
   for (const file of files) {
     services.push(...analyzeFile(file.fullPath, file.relPath))
   }
-  const { sorted, cycles, duplicateTokens } = resolveAndSort(services)
+  const { sorted, cycles, duplicateTokens } = resolveAndSort(
+    services,
+    config.targetEnv
+  )
   sorted.forEach((service, index) => {
     service.registrationOrder = index
   })
@@ -173,14 +206,50 @@ export function generateManifest(config: DiademConfig): GenerateResult {
     0
   )
 
+  const lifecycleByClass = new Map(
+    emitted.map((s) => [s.className, s.lifecycle])
+  )
+  const multiTokens = new Set(
+    emitted.filter((s) => s.multi && s.token).map((s) => s.token as string)
+  )
+
+  // A dep on a multi token is reported as a multiInjection (with a pointed
+  // message), not as unresolved — implementations exist, they just can't be
+  // injected as a single parameter.
   const unresolved: UnresolvedDependency[] = []
   for (const service of emitted) {
     for (const dep of service.resolvedDependencies) {
-      if (dep.external && !dep.isOptional) {
+      if (dep.external && !dep.isOptional && !multiTokens.has(dep.typeName)) {
         unresolved.push({
           service: service.className,
           paramName: dep.paramName,
           typeName: dep.typeName
+        })
+      }
+    }
+  }
+
+  const captiveDependencies: CaptiveDependency[] = []
+  const multiInjections: MultiInjection[] = []
+  for (const service of emitted) {
+    for (const dep of service.resolvedDependencies) {
+      if (multiTokens.has(dep.typeName)) {
+        multiInjections.push({
+          service: service.className,
+          paramName: dep.paramName,
+          token: dep.typeName
+        })
+      }
+      if (
+        service.lifecycle !== 'scoped' &&
+        dep.implementingService &&
+        lifecycleByClass.get(dep.implementingService) === 'scoped'
+      ) {
+        captiveDependencies.push({
+          service: service.className,
+          serviceLifecycle: service.lifecycle,
+          paramName: dep.paramName,
+          dependency: dep.typeName
         })
       }
     }
@@ -194,7 +263,9 @@ export function generateManifest(config: DiademConfig): GenerateResult {
     unresolved,
     duplicateTokens,
     providerCount,
-    asyncCount
+    asyncCount,
+    captiveDependencies,
+    multiInjections
   }
 }
 
@@ -340,6 +411,7 @@ function analyzeClass(
     className: node.name.text,
     lifecycle: decoratorInfo.lifecycle,
     environment: decoratorInfo.environment,
+    multi: decoratorInfo.multi,
     token,
     tokenExported: !!token && exportedClasses.has(token),
     tokenModule: token ? tokenSources.get(token) : undefined,
@@ -384,6 +456,7 @@ interface DecoratorInfo {
   lifecycle: Lifecycle
   token?: string
   environment?: string
+  multi?: boolean
 }
 
 function findDIDecorator(node: ts.ClassDeclaration): DecoratorInfo | null {
@@ -410,14 +483,38 @@ function findDIDecorator(node: ts.ClassDeclaration): DecoratorInfo | null {
 
     let token: string | undefined
     let environment: string | undefined
+    let multi: boolean | undefined
     if (args && args.length > 0 && ts.isIdentifier(args[0])) {
       token = args[0].getText()
     }
-    if (args && args.length > 1 && ts.isStringLiteral(args[1])) {
+    if (name === 'scoped') {
+      if (args && args.length > 2 && ts.isStringLiteral(args[2])) {
+        environment = args[2].text
+      }
+    } else if (args && args.length > 1 && ts.isStringLiteral(args[1])) {
       environment = args[1].text
+    } else if (args && args.length > 1 && ts.isObjectLiteralExpression(args[1])) {
+      for (const prop of args[1].properties) {
+        if (!ts.isPropertyAssignment(prop)) {
+          continue
+        }
+        const propName = prop.name.getText()
+        if (
+          propName === 'multi' &&
+          prop.initializer.kind === ts.SyntaxKind.TrueKeyword
+        ) {
+          multi = true
+        }
+        if (
+          (propName === 'env' || propName === 'environment') &&
+          ts.isStringLiteral(prop.initializer)
+        ) {
+          environment = prop.initializer.text
+        }
+      }
     }
 
-    return { lifecycle, token, environment }
+    return { lifecycle, token, environment, multi }
   }
 
   return null
@@ -573,7 +670,10 @@ function isExported(node: ts.ClassDeclaration): boolean {
 
 // --- Dependency resolution + topological sort ------------------------------
 
-function resolveAndSort(services: ServiceInfo[]): {
+function resolveAndSort(
+  services: ServiceInfo[],
+  targetEnv?: string
+): {
   sorted: ServiceInfo[]
   cycles: string[]
   duplicateTokens: string[]
@@ -582,15 +682,36 @@ function resolveAndSort(services: ServiceInfo[]): {
   const tokenToImpl = new Map<string, string>()
   const duplicateTokens = new Set<string>()
 
+  // Environment-aware token resolution. When a target environment is set,
+  // implementations filtered out by it don't own their token (so an env-split
+  // token resolves to the impl that will actually be emitted). A token is only
+  // ambiguous when two owning impls can coexist in the same environment —
+  // one impl per environment is the supported pattern, not a collision.
+  const inTarget = (s: ServiceInfo): boolean =>
+    !targetEnv || !s.environment || s.environment === targetEnv
+  const tokenOwners = new Map<string, ServiceInfo[]>()
+
   for (const service of services) {
     serviceByName.set(service.className, service)
-    if (service.token) {
-      if (tokenToImpl.has(service.token)) {
-        duplicateTokens.add(service.token)
-      } else {
-        tokenToImpl.set(service.token, service.className)
-      }
+    if (service.token && !service.multi && inTarget(service)) {
+      const owners = tokenOwners.get(service.token) ?? []
+      owners.push(service)
+      tokenOwners.set(service.token, owners)
     }
+  }
+
+  for (const [token, owners] of tokenOwners) {
+    const collides = owners.some((a, i) =>
+      owners.some(
+        (b, j) =>
+          j > i &&
+          (!a.environment || !b.environment || a.environment === b.environment)
+      )
+    )
+    if (collides) {
+      duplicateTokens.add(token)
+    }
+    tokenToImpl.set(token, owners[0].className)
   }
 
   const resolveByHeuristic = (typeName: string): string | undefined => {
@@ -716,6 +837,9 @@ function toEntry(service: ServiceInfo, outFile: string): Record<string, unknown>
   if (service.environment) {
     entry.environment = service.environment
   }
+  if (service.multi) {
+    entry.multi = true
+  }
   return entry
 }
 
@@ -764,7 +888,15 @@ function renderManifest(
     .join(',\n')
 
   const lifecycleCounts = (
-    ['dependency', 'singleton', 'factory', 'lazy', 'lazySingleton', 'asyncSingleton'] as const
+    [
+      'dependency',
+      'singleton',
+      'factory',
+      'lazy',
+      'lazySingleton',
+      'scoped',
+      'asyncSingleton'
+    ] as const
   )
     .map((lc) => `    ${lc}: ${services.filter((s) => s.lifecycle === lc).length}`)
     .join(',\n')
@@ -871,7 +1003,6 @@ ${lifecycleCounts}
 const EAGER_LIFECYCLES: ReadonlySet<Lifecycle> = new Set([
   'singleton',
   'dependency',
-  'lazySingleton',
   'asyncSingleton'
 ])
 
@@ -901,10 +1032,8 @@ function externalDefault(typeName: string): string {
  * during construction. One environment is baked in (config.targetEnv) so there
  * is zero runtime branching.
  *
- * Note: in compiled mode `lazySingleton` is treated as eager (its instance is
- * needed up front to be referenced by dependents), and runtime mock/override
- * registration is not available — use the manifest emit for dev/test if you
- * need that dynamism.
+ * `lazySingleton` is emitted as a cached factory: registered at container
+ * creation time, but instantiated only when first resolved.
  */
 function renderCompiled(
   allServices: ServiceInfo[],
@@ -958,6 +1087,7 @@ function renderCompiled(
     (s): s is ServiceInfo & { token: string; tokenModule: TokenModule } =>
       !!s.token &&
       !!s.tokenModule &&
+      !s.multi &&
       tokenCount.get(s.token) === 1 &&
       (s.token === s.className || !classNames.has(s.token))
   )
@@ -975,8 +1105,10 @@ function renderCompiled(
     })
     .join('\n')
 
-  // Services that can be replaced via overrides (eager + unique importable token).
-  const overridable = typed.filter((s) => eager.get(s.className))
+  // Services that can be replaced via overrides (eager/lazy singleton + unique importable token).
+  const overridable = typed.filter(
+    (s) => eager.get(s.className) || s.lifecycle === 'lazySingleton'
+  )
   const overridableTokens = new Set(overridable.map((s) => s.token))
 
   // Non-primitive externals that can be *provided* via overrides — only those
@@ -1009,7 +1141,7 @@ function renderCompiled(
     .join('\n')
 
   let needsRequireExternal = false
-  const argExpr = (service: ServiceInfo): string => {
+  const argExpr = (service: ServiceInfo, resolverName = 'c'): string => {
     const arity = service.dependencies.reduce(
       (max, d) => Math.max(max, d.paramIndex + 1),
       0
@@ -1045,7 +1177,7 @@ function renderCompiled(
       if (impl && selected.has(impl)) {
         args[dep.paramIndex] = eager.get(impl)
           ? localName(impl)
-          : `c.resolve(token(${impl}))`
+          : `${resolverName}.resolve(token(${impl}))`
       } else {
         args[dep.paramIndex] = 'undefined'
       }
@@ -1088,19 +1220,57 @@ function renderCompiled(
       const factoryCall = `${ovr}${anyAsync && service.isAsync ? 'await ' : ''}${providerLocal(service.providerClass)}.${service.providerMethod}(${argExpr(service)})`
       lines.push(`  const ${localName(cls)} = ${factoryCall}`)
       lines.push(`  c.register(${service.token}, ${localName(cls)})`)
+    } else if (service.multi) {
+      lines.push(`  const ${localName(cls)} = new ${cls}(${argExpr(service)})`)
+      lines.push(`  c.registerMulti(token(${cls}), ${localName(cls)})`)
     } else if (eager.get(cls)) {
-      lines.push(`  const ${localName(cls)} = ${ovr}new ${cls}(${argExpr(service)})`)
       // Call onInit hook if present. For eager services with async onInit, await
-      // it in async containers. Skip onInit if the instance was overridden.
-      if (service.hasOnInit) {
-        const initCall = `${anyAsync && service.isAsync ? 'await ' : ''}${localName(cls)}.onInit()`
-        if (service.token && overridableTokens.has(service.token)) {
-          lines.push(`  if (!overrides.${service.token}) ${initCall}`)
-        } else {
-          lines.push(`  ${initCall}`)
+      // it in async containers. Skip onInit if the instance was overridden — an
+      // override is constructed branch-separately so onInit stays typed against
+      // the implementation class (the token type may not declare onInit).
+      const awaitInit = anyAsync && service.isAsync ? 'await ' : ''
+      if (
+        service.hasOnInit &&
+        service.token &&
+        overridableTokens.has(service.token)
+      ) {
+        lines.push(`  let ${localName(cls)}: ${service.token}`)
+        lines.push(`  if (overrides.${service.token}) {`)
+        lines.push(`    ${localName(cls)} = overrides.${service.token}`)
+        lines.push('  } else {')
+        lines.push(`    const instance = new ${cls}(${argExpr(service)})`)
+        lines.push(`    ${awaitInit}instance.onInit()`)
+        lines.push(`    ${localName(cls)} = instance`)
+        lines.push('  }')
+      } else {
+        lines.push(`  const ${localName(cls)} = ${ovr}new ${cls}(${argExpr(service)})`)
+        if (service.hasOnInit) {
+          lines.push(`  ${awaitInit}${localName(cls)}.onInit()`)
         }
       }
       lines.push(`  c.register(token(${cls}), ${localName(cls)})`)
+    } else if (service.lifecycle === 'lazySingleton') {
+      if (service.token && overridableTokens.has(service.token)) {
+        lines.push(`  if (overrides.${service.token}) {`)
+        lines.push(`    c.register(token(${cls}), overrides.${service.token})`)
+        lines.push('  } else {')
+        lines.push(`    let ${localName(cls)}: ${cls} | undefined`)
+        lines.push(`    c.registerFactory(token(${cls}), () => {`)
+        lines.push(`      ${localName(cls)} ??= new ${cls}(${argExpr(service)})`)
+        lines.push(`      return ${localName(cls)}`)
+        lines.push('    })')
+        lines.push('  }')
+      } else {
+        lines.push(`  let ${localName(cls)}: ${cls} | undefined`)
+        lines.push(`  c.registerFactory(token(${cls}), () => {`)
+        lines.push(`    ${localName(cls)} ??= new ${cls}(${argExpr(service)})`)
+        lines.push(`    return ${localName(cls)}`)
+        lines.push('  })')
+      }
+    } else if (service.lifecycle === 'scoped') {
+      lines.push(
+        `  c.registerScoped(token(${cls}), (scope) => new ${cls}(${argExpr(service, 'scope')}))`
+      )
     } else {
       lines.push(
         `  c.registerFactory(token(${cls}), () => new ${cls}(${argExpr(service)}))`
@@ -1418,6 +1588,7 @@ function renderGraphHtml(data: GraphData): string {
   .lg-singleton::before { background: #3b82f6; }
   .lg-lazy::before { background: #10b981; }
   .lg-lazysingleton::before { background: #8b5cf6; }
+  .lg-scoped::before { background: #06b6d4; }
   .lg-external::before { background: #9ca3af; }
 </style>
 </head>
@@ -1430,6 +1601,7 @@ function renderGraphHtml(data: GraphData): string {
   <span class="legend">
     <span class="lg-singleton">singleton</span>
     <span class="lg-lazysingleton">lazySingleton</span>
+    <span class="lg-scoped">scoped</span>
     <span class="lg-lazy">lazy / factory</span>
     <span class="lg-external">external</span>
   </span>
@@ -1465,6 +1637,7 @@ var cy = cytoscape({
   style: [
     { selector: 'node', style: { 'label': 'data(label)', 'font-size': 10, 'text-valign': 'center', 'text-halign': 'center', 'color': '#fff', 'width': 'label', 'height': 22, 'padding': '8px', 'shape': 'round-rectangle', 'background-color': '#3b82f6', 'border-width': 1, 'border-color': '#1e3a8a' } },
     { selector: 'node[lifecycle="lazySingleton"]', style: { 'background-color': '#8b5cf6', 'border-color': '#5b21b6' } },
+    { selector: 'node[lifecycle="scoped"]', style: { 'background-color': '#06b6d4', 'border-color': '#0e7490' } },
     { selector: 'node[lifecycle="lazy"]', style: { 'background-color': '#10b981', 'border-color': '#065f46' } },
     { selector: 'node[lifecycle="factory"]', style: { 'background-color': '#10b981', 'border-color': '#065f46' } },
     { selector: 'node[lifecycle="external"]', style: { 'background-color': '#9ca3af', 'border-color': '#4b5563', 'border-style': 'dashed', 'color': '#111' } },
