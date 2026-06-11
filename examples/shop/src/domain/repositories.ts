@@ -1,6 +1,6 @@
 import { singleton } from '@devcraft-ts/diadem'
-import { IDatabase } from './database'
-import { ILogger } from './infrastructure'
+import { IDatabase } from '../infrastructure/database'
+import { ILogger } from '../infrastructure/runtime'
 
 export interface User {
   id: string

@@ -1,5 +1,5 @@
 import { singleton } from '@devcraft-ts/diadem'
-import { IConfig, ILogger } from './infrastructure'
+import { IConfig, ILogger } from './runtime'
 
 /**
  * A third-party SDK client. It has no `@singleton` decorator and needs an API

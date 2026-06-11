@@ -1,5 +1,5 @@
 import { singleton } from '@devcraft-ts/diadem'
-import { IConfig, ILogger } from './infrastructure'
+import { IConfig, ILogger } from './runtime'
 
 export abstract class IEmailService {
   abstract send(to: string, subject: string, body: string): void

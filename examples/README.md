@@ -15,16 +15,16 @@ because it exercises every feature:
 Visualize its dependency graph (no build or install needed — open the HTML):
 
 ```bash
-npx diadem graph --cwd examples/shop --scan-dir . --out graph.html
+npx diadem graph --cwd examples/shop --scan-dir src --out graph.html
 ```
 
-That graph has 16 services and 35 edges: `StripeClient` shows up greyed as
+That graph has 17 services and 36 edges: `StripeClient` shows up greyed as
 external, `SegmentAnalytics` appears only under the `production` env filter, and
 the optional analytics edge is dashed. You can also generate its manifest:
 
 ```bash
-npx diadem build --cwd examples/shop --scan-dir . --out generated/service-manifest.ts
-# then run examples/shop/main.ts
+npx diadem build --cwd examples/shop
+# then run examples/shop/src/main.ts
 ```
 
 ## `basic.ts` — hand-written manifest

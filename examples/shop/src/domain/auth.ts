@@ -1,5 +1,5 @@
 import { singleton } from '@devcraft-ts/diadem'
-import { IConfig, ILogger } from './infrastructure'
+import { IConfig, ILogger } from '../infrastructure/runtime'
 import { IUserRepository } from './repositories'
 
 export abstract class IPasswordHasher {

@@ -1,8 +1,8 @@
 import { singleton } from '@devcraft-ts/diadem'
-import { IAnalytics } from './analytics'
-import { IClock, ILogger } from './infrastructure'
-import { INotificationService } from './messaging'
-import { IPaymentGateway } from './payments'
+import { IAnalytics } from '../infrastructure/analytics'
+import { IClock, ILogger } from '../infrastructure/runtime'
+import { INotificationService } from '../infrastructure/messaging'
+import { IPaymentGateway } from '../infrastructure/payments'
 import { IOrderRepository, IProductRepository, type Order } from './repositories'
 
 export abstract class ICartService {

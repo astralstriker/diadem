@@ -1,0 +1,5 @@
+{
+  "scanDirs": ["src"],
+  "outFile": "src/generated/service-manifest.ts",
+  "emit": "compiled"
+}

@@ -1,7 +1,7 @@
 import { singleton } from '@devcraft-ts/diadem'
-import { IAuthService } from './auth'
-import { ICartService, IOrderService } from './commerce'
-import { ILogger } from './infrastructure'
+import { IAuthService } from './domain/auth'
+import { ICartService, IOrderService } from './domain/commerce'
+import { ILogger } from './infrastructure/runtime'
 
 /** The composition root: what your HTTP layer would resolve and call into. */
 export abstract class IShopApp {

@@ -1,5 +1,5 @@
 import { provider, provides } from '@devcraft-ts/diadem'
-import { IConfig } from './infrastructure'
+import { IConfig } from './runtime'
 import { StripeClient } from './payments'
 
 /**
@@ -10,7 +10,7 @@ import { StripeClient } from './payments'
  *
  * Provider bindings only run in compiled wiring, so build the example with:
  *
- *   diadem build --emit=compiled --scan-dir examples/shop --out examples/shop/generated/container.ts
+ *   diadem build --cwd examples/shop
  *
  * (Manifest mode is runtime-interpreted and can't call provider methods.)
  */

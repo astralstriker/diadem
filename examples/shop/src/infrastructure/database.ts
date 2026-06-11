@@ -1,5 +1,5 @@
 import { lazySingleton } from '@devcraft-ts/diadem'
-import { IConfig, ILogger } from './infrastructure'
+import { IConfig, ILogger } from './runtime'
 
 /**
  * Database connection. Registered as a `lazySingleton` so the connection isn't
