@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { loadConfig } from './config'
-import { generateGraph, generateManifest } from './generator'
+import { checkManifest, generateGraph, generateManifest } from './generator'
 
 let root: string
 
@@ -668,6 +668,194 @@ describe('manifest generator', () => {
       // Synthetic provider entries never reach the runtime manifest.
       expect(code).not.toContain('Integrations#stripe')
       expect(code).not.toContain('_provider_')
+    })
+  })
+
+  describe('heuristic resolution', () => {
+    it('does not report token-declared resolutions as heuristic', () => {
+      write(
+        'src/logger.ts',
+        `import { singleton } from 'diadem'
+         export abstract class ILogger { abstract log(m: string): void }
+         @singleton(ILogger)
+         export class ConsoleLogger extends ILogger { log(m: string) {} }`
+      )
+      write(
+        'src/app.ts',
+        `import { singleton } from 'diadem'
+         import { ILogger } from './logger'
+         export abstract class IApp { abstract go(): void }
+         @singleton(IApp)
+         export class App extends IApp {
+           constructor(private readonly logger: ILogger) { super() }
+           go() {}
+         }`
+      )
+      const result = generateManifest(loadConfig(root))
+      expect(result.heuristicResolutions).toHaveLength(0)
+      expect(result.heuristicAmbiguities).toHaveLength(0)
+    })
+
+    it('reports an I-prefix exact match as a heuristic resolution', () => {
+      write(
+        'src/logger.ts',
+        `import { singleton } from 'diadem'
+         @singleton()
+         export class Logger { log(m: string) {} }`
+      )
+      write(
+        'src/app.ts',
+        `import { singleton } from 'diadem'
+         export abstract class IApp { abstract go(): void }
+         @singleton(IApp)
+         export class App extends IApp {
+           constructor(private readonly logger: ILogger) { super() }
+           go() {}
+         }`
+      )
+      const result = generateManifest(loadConfig(root))
+      expect(result.heuristicResolutions).toEqual([
+        {
+          service: 'App',
+          paramName: 'logger',
+          typeName: 'ILogger',
+          implementingService: 'Logger'
+        }
+      ])
+      // Still wired (a warning, not a behavior change), and marked in the manifest.
+      const manifest = readFileSync(result.outFile, 'utf8')
+      expect(manifest).toContain('"implementingService": "Logger"')
+      expect(manifest).toContain('"heuristic": true')
+    })
+
+    it('reports a unique suffix match as a heuristic resolution', () => {
+      write(
+        'src/payments.ts',
+        `import { singleton } from 'diadem'
+         @singleton()
+         export class PaymentService { charge() {} }`
+      )
+      write(
+        'src/checkout.ts',
+        `import { singleton } from 'diadem'
+         export abstract class ICheckout { abstract go(): void }
+         @singleton(ICheckout)
+         export class Checkout extends ICheckout {
+           constructor(private readonly payments: IPayment) { super() }
+           go() {}
+         }`
+      )
+      const result = generateManifest(loadConfig(root))
+      expect(result.heuristicResolutions).toEqual([
+        {
+          service: 'Checkout',
+          paramName: 'payments',
+          typeName: 'IPayment',
+          implementingService: 'PaymentService'
+        }
+      ])
+    })
+
+    it('leaves ambiguous heuristic matches unwired and reports the candidates', () => {
+      write(
+        'src/loans.ts',
+        `import { singleton } from 'diadem'
+         @singleton()
+         export class LoanService { a() {} }
+         @singleton()
+         export class LoanRepository { b() {} }`
+      )
+      write(
+        'src/app.ts',
+        `import { singleton } from 'diadem'
+         export abstract class IApp { abstract go(): void }
+         @singleton(IApp)
+         export class App extends IApp {
+           constructor(private readonly loan: ILoan) { super() }
+           go() {}
+         }`
+      )
+      const result = generateManifest(loadConfig(root))
+      expect(result.heuristicAmbiguities).toEqual([
+        {
+          service: 'App',
+          paramName: 'loan',
+          typeName: 'ILoan',
+          candidates: ['LoanRepository', 'LoanService']
+        }
+      ])
+      // Never silently wired to whichever candidate the scan found first...
+      const manifest = readFileSync(result.outFile, 'utf8')
+      expect(manifest).not.toContain('"implementingService": "LoanService"')
+      expect(manifest).not.toContain('"implementingService": "LoanRepository"')
+      // ...and reported via the pointed ambiguity diagnostic, not as plain unresolved.
+      expect(result.unresolved).toHaveLength(0)
+      expect(result.externalDependencies).toBe(1)
+    })
+  })
+
+  describe('check mode', () => {
+    function writeService(body = 'log(m: string) {}'): void {
+      write(
+        'src/logger.ts',
+        `import { singleton } from 'diadem'
+         export abstract class ILogger { abstract log(m: string): void }
+         @singleton(ILogger)
+         export class ConsoleLogger extends ILogger { ${body} }`
+      )
+    }
+
+    it('reports up to date when the committed manifest matches the source', () => {
+      writeService()
+      const config = loadConfig(root)
+      generateManifest(config)
+
+      const check = checkManifest(config)
+      expect(check.upToDate).toBe(true)
+      expect(check.missing).toBe(false)
+      expect(check.serviceCount).toBe(1)
+    })
+
+    it('reports stale when the source changed after generation, without writing', () => {
+      writeService()
+      const config = loadConfig(root)
+      const { outFile } = generateManifest(config)
+      const committed = readFileSync(outFile, 'utf8')
+
+      write(
+        'src/extra.ts',
+        `import { singleton } from 'diadem'
+         export abstract class IExtra { abstract e(): void }
+         @singleton(IExtra)
+         export class Extra extends IExtra { e() {} }`
+      )
+
+      const check = checkManifest(config)
+      expect(check.upToDate).toBe(false)
+      expect(check.missing).toBe(false)
+      // check never mutates the committed file.
+      expect(readFileSync(outFile, 'utf8')).toBe(committed)
+    })
+
+    it('reports missing when no manifest has been generated', () => {
+      writeService()
+      const check = checkManifest(loadConfig(root))
+      expect(check.upToDate).toBe(false)
+      expect(check.missing).toBe(true)
+    })
+
+    it('checks compiled emit output too', () => {
+      writeService()
+      const config = loadConfig(root, {
+        emit: 'compiled',
+        outFile: 'src/generated/container.ts'
+      })
+      generateManifest(config)
+      expect(checkManifest(config).upToDate).toBe(true)
+
+      writeService('log(m: string) { console.log(m) }')
+      // Compiled wiring is structural — a body-only change keeps it identical.
+      expect(checkManifest(config).upToDate).toBe(true)
     })
   })
 

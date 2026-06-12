@@ -49,6 +49,10 @@ interface RawDependency {
 interface ResolvedDependency extends RawDependency {
   implementingService?: string
   external?: boolean
+  /** True when the wiring came from the naming heuristic, not a declared token. */
+  heuristic?: boolean
+  /** Set when the naming heuristic matched several services (left unwired). */
+  heuristicCandidates?: string[]
 }
 
 /** Where a token (abstract class) can be imported from. */
@@ -111,6 +115,30 @@ export interface MultiInjection {
   token: string
 }
 
+/**
+ * A dependency wired by naming convention (`IFoo` → `Foo`/`FooService`) rather
+ * than a declared token. Convention matches are guesses — they're reported so
+ * the wiring is never silent, and they fail the build under `--strict`.
+ */
+export interface HeuristicResolution {
+  service: string
+  paramName: string
+  typeName: string
+  implementingService: string
+}
+
+/**
+ * A naming-convention match with more than one candidate. Never wired (picking
+ * one would be arbitrary and scan-order dependent); declare the type as a token
+ * on the intended implementation instead.
+ */
+export interface AmbiguousHeuristic {
+  service: string
+  paramName: string
+  typeName: string
+  candidates: string[]
+}
+
 export interface GenerateResult {
   outFile: string
   serviceCount: number
@@ -135,6 +163,10 @@ export interface GenerateResult {
   captiveDependencies: CaptiveDependency[]
   /** Multi-bound tokens injected as single constructor parameters. */
   multiInjections: MultiInjection[]
+  /** Dependencies wired by naming convention instead of a declared token. */
+  heuristicResolutions: HeuristicResolution[]
+  /** Naming-convention matches with multiple candidates (left unwired). */
+  heuristicAmbiguities: AmbiguousHeuristic[]
 }
 
 const PRIMITIVE_TYPES = new Set([
@@ -181,8 +213,16 @@ function analyzeGraph(config: DiademConfig): {
   return { services: sorted, cycles, duplicateTokens }
 }
 
-/** Run the full generation pipeline and write the manifest file. */
-export function generateManifest(config: DiademConfig): GenerateResult {
+/**
+ * Run the full analysis + render pipeline without touching the filesystem.
+ * Shared by `generateManifest` (which writes) and `checkManifest` (which
+ * compares against the committed file).
+ */
+function buildOutput(config: DiademConfig): {
+  outFile: string
+  content: string
+  result: GenerateResult
+} {
   const { services: sorted, cycles, duplicateTokens } = analyzeGraph(config)
 
   const providerCount = sorted.filter((s) => s.providerClass).length
@@ -198,8 +238,6 @@ export function generateManifest(config: DiademConfig): GenerateResult {
     config.emit === 'compiled'
       ? renderCompiled(emitted, config, outFile)
       : renderManifest(emitted, config, outFile)
-  mkdirSync(dirname(outFile), { recursive: true })
-  writeFileSync(outFile, content, 'utf8')
 
   const externalDependencies = emitted.reduce(
     (sum, s) => sum + s.resolvedDependencies.filter((d) => d.external).length,
@@ -213,13 +251,18 @@ export function generateManifest(config: DiademConfig): GenerateResult {
     emitted.filter((s) => s.multi && s.token).map((s) => s.token as string)
   )
 
-  // A dep on a multi token is reported as a multiInjection (with a pointed
-  // message), not as unresolved — implementations exist, they just can't be
-  // injected as a single parameter.
+  // A dep on a multi token is reported as a multiInjection, and an ambiguous
+  // heuristic match as a heuristicAmbiguity (each with a pointed message), not
+  // as unresolved — candidates exist, the wiring just can't pick one safely.
   const unresolved: UnresolvedDependency[] = []
   for (const service of emitted) {
     for (const dep of service.resolvedDependencies) {
-      if (dep.external && !dep.isOptional && !multiTokens.has(dep.typeName)) {
+      if (
+        dep.external &&
+        !dep.isOptional &&
+        !dep.heuristicCandidates &&
+        !multiTokens.has(dep.typeName)
+      ) {
         unresolved.push({
           service: service.className,
           paramName: dep.paramName,
@@ -231,6 +274,8 @@ export function generateManifest(config: DiademConfig): GenerateResult {
 
   const captiveDependencies: CaptiveDependency[] = []
   const multiInjections: MultiInjection[] = []
+  const heuristicResolutions: HeuristicResolution[] = []
+  const heuristicAmbiguities: AmbiguousHeuristic[] = []
   for (const service of emitted) {
     for (const dep of service.resolvedDependencies) {
       if (multiTokens.has(dep.typeName)) {
@@ -238,6 +283,22 @@ export function generateManifest(config: DiademConfig): GenerateResult {
           service: service.className,
           paramName: dep.paramName,
           token: dep.typeName
+        })
+      }
+      if (dep.heuristic && dep.implementingService) {
+        heuristicResolutions.push({
+          service: service.className,
+          paramName: dep.paramName,
+          typeName: dep.typeName,
+          implementingService: dep.implementingService
+        })
+      }
+      if (dep.heuristicCandidates) {
+        heuristicAmbiguities.push({
+          service: service.className,
+          paramName: dep.paramName,
+          typeName: dep.typeName,
+          candidates: dep.heuristicCandidates
         })
       }
       if (
@@ -255,7 +316,7 @@ export function generateManifest(config: DiademConfig): GenerateResult {
     }
   }
 
-  return {
+  const result: GenerateResult = {
     outFile,
     serviceCount: emitted.length,
     cycles,
@@ -265,8 +326,38 @@ export function generateManifest(config: DiademConfig): GenerateResult {
     providerCount,
     asyncCount,
     captiveDependencies,
-    multiInjections
+    multiInjections,
+    heuristicResolutions,
+    heuristicAmbiguities
   }
+  return { outFile, content, result }
+}
+
+/** Run the full generation pipeline and write the manifest file. */
+export function generateManifest(config: DiademConfig): GenerateResult {
+  const { outFile, content, result } = buildOutput(config)
+  mkdirSync(dirname(outFile), { recursive: true })
+  writeFileSync(outFile, content, 'utf8')
+  return result
+}
+
+/** Result of a non-mutating `diadem check` run. */
+export interface CheckResult extends GenerateResult {
+  /** True when the file on disk matches what `diadem build` would write. */
+  upToDate: boolean
+  /** True when the output file doesn't exist at all. */
+  missing: boolean
+}
+
+/**
+ * Regenerate in memory and compare against the committed output — nothing is
+ * written. Backs `diadem check`, the CI guard against stale generated wiring.
+ */
+export function checkManifest(config: DiademConfig): CheckResult {
+  const { outFile, content, result } = buildOutput(config)
+  const missing = !existsSync(outFile)
+  const upToDate = !missing && readFileSync(outFile, 'utf8') === content
+  return { ...result, upToDate, missing }
 }
 
 // --- File collection -------------------------------------------------------
@@ -714,36 +805,62 @@ function resolveAndSort(
     tokenToImpl.set(token, owners[0].className)
   }
 
-  const resolveByHeuristic = (typeName: string): string | undefined => {
+  // Fallback for types that aren't declared tokens. A direct class-name match
+  // is exact; everything past it is a naming-convention guess (`IFoo` → `Foo`,
+  // then `IFoo` → unique `*FooService`/`*FooRepository`) and is flagged as
+  // heuristic so the CLI can warn — and `--strict` can refuse — rather than
+  // wiring silently. Multiple convention candidates are never wired: picking
+  // one would be arbitrary and dependent on file-scan order.
+  const resolveByHeuristic = (
+    typeName: string
+  ): { match?: string; heuristic?: boolean; candidates?: string[] } => {
     const direct = serviceByName.get(typeName)
     if (direct) {
-      return direct.className
+      return { match: direct.className }
     }
     if (typeName.startsWith('I')) {
       const stripped = typeName.slice(1)
       if (serviceByName.has(stripped)) {
-        return stripped
+        return { match: stripped, heuristic: true }
       }
-      const suffixed = services.find(
-        (s) =>
-          (s.className.endsWith('Service') ||
-            s.className.endsWith('Repository')) &&
-          s.className.includes(stripped)
-      )
-      if (suffixed) {
-        return suffixed.className
+      const candidates = [
+        ...new Set(
+          services
+            .filter(
+              (s) =>
+                (s.className.endsWith('Service') ||
+                  s.className.endsWith('Repository')) &&
+                s.className.includes(stripped)
+            )
+            .map((s) => s.className)
+        )
+      ].sort()
+      if (candidates.length === 1) {
+        return { match: candidates[0], heuristic: true }
+      }
+      if (candidates.length > 1) {
+        return { candidates }
       }
     }
-    return undefined
+    return {}
   }
 
   for (const service of services) {
     service.resolvedDependencies = service.dependencies.map((dep) => {
-      const implementingService =
-        tokenToImpl.get(dep.typeName) ?? resolveByHeuristic(dep.typeName)
-      return implementingService
-        ? { ...dep, implementingService }
-        : { ...dep, external: true }
+      const tokenImpl = tokenToImpl.get(dep.typeName)
+      if (tokenImpl) {
+        return { ...dep, implementingService: tokenImpl }
+      }
+      const guess = resolveByHeuristic(dep.typeName)
+      if (guess.match) {
+        return guess.heuristic
+          ? { ...dep, implementingService: guess.match, heuristic: true }
+          : { ...dep, implementingService: guess.match }
+      }
+      if (guess.candidates) {
+        return { ...dep, external: true, heuristicCandidates: guess.candidates }
+      }
+      return { ...dep, external: true }
     })
   }
 

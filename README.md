@@ -66,10 +66,20 @@ Configure via flags or a `diadem.config.json` in the project root (flags win):
 diadem build --scan-dir src --out src/generated/service-manifest.ts --strict
 ```
 
-`--strict` exits non-zero on dependency cycles, ambiguous (duplicated) tokens, or
-required dependencies with no implementing service — turning runtime surprises
-into build failures. (`--fail-on-cycle` is the narrower cycles-only variant.)
+`--strict` exits non-zero on dependency cycles, ambiguous (duplicated) tokens,
+required dependencies with no implementing service, or dependencies wired by
+naming heuristic instead of a declared token — turning runtime surprises into
+build failures. (`--fail-on-cycle` is the narrower cycles-only variant.)
 Wire it into your build, e.g. `"prebuild": "diadem build --strict"`.
+
+In CI, use `diadem check`: it regenerates the output **in memory**, compares it
+against the committed file, and exits non-zero if they differ — nothing is
+written, so a PR that changes the service graph without re-running `diadem
+build` fails fast instead of shipping stale wiring:
+
+```bash
+diadem check --strict   # non-mutating; fails on drift or strict violations
+```
 
 ### Compiled mode (zero-overhead wiring)
 
@@ -236,6 +246,8 @@ The dependency graph reveals what's already happening in your code — patterns 
 
 **External dependencies** — Services that depend on things the container can't construct (third-party APIs, runtime config). `diadem build` tracks these and warns or fails with `--strict`.
 
+**Convention-wired dependencies** — Dependencies matched by naming heuristic instead of a declared token. The generator reports every guess, refuses ambiguous ones outright, and `--strict` fails the build.
+
 **Architectural boundaries** — The graph shows which services talk to which, revealing whether your intended layering (controller → application → domain → infrastructure) matches reality.
 
 ## Concepts
@@ -293,6 +305,29 @@ const plugins = container.resolveAll(IPlugin)
 Multi-bound tokens are retrieved with `resolveAll`, never injected as a single
 constructor parameter — the generator warns if a service tries, and `--strict`
 fails the build.
+
+### Token resolution and the naming heuristic
+
+Dependencies resolve **token-first**: a constructor parameter typed as a
+declared token (`@singleton(ILogger)` → param `logger: ILogger`) is wired to
+that token's implementation. When the parameter's type is *not* a declared
+token, the generator falls back to a naming convention: `IFoo` matches a
+service class named `Foo`, or a unique `*Service`/`*Repository` whose name
+contains `Foo`.
+
+Convention matches are guesses, so they are never silent:
+
+- Every heuristic wiring prints a warning naming the guessed implementation
+  and **fails the build under `--strict`** — strict's contract is "no runtime
+  surprises", and a guess is one.
+- If the convention matches **more than one** candidate (say `ILoan` against
+  both `LoanService` and `LoanRepository`), diadem refuses to pick: the
+  dependency is left unresolved and reported with the full candidate list.
+  Earlier versions wired whichever match was found first in scan order — which
+  meant a file rename could silently rewire production.
+
+Declared tokens are the explicit, reliable path; treat the heuristic as a
+prototyping convenience.
 
 ## Quick start
 
@@ -426,12 +461,29 @@ transformer (and `ts-patch`/`ttypescript`, which broke at TS 5.0), whereas
 `diadem` emits plain `.ts` that any toolchain (tsc, esbuild, swc, vite, bun)
 compiles as-is.
 
-Trade-offs to know: build-time graph validation is name-based (`--strict` turns
-unresolved/ambiguous tokens into build errors) rather than fully type-driven; a
-singleton's factory runs at registration, so **registration order matters** (the
-generator emits services in topological order for you; use `lazySingleton` to
-defer construction); and the generated manifest grows with the number of
-services. The decorators work under both TC39 (Stage 3) and legacy
+Trade-offs to know — stated plainly, because they matter at scale:
+
+- **Graph analysis is syntactic and name-based, not type-checked.** The
+  generator parses each file's AST without building a TypeScript program —
+  that's what keeps builds fast, but it has two consequences. (a) Token
+  identity is the token's *name*: two different abstract classes that happen to
+  share a name (e.g. two `IConfig`s in different packages of a monorepo) can
+  collide or cross-wire. (b) Nothing structurally verifies that a decorated
+  class actually implements its token. `--strict` catches everything catchable
+  by name (unresolved and ambiguous tokens, heuristic wiring, cycles, scope
+  violations); an opt-in type-checked pass for structural verification and
+  cross-package token disambiguation (`--type-check`) is on the roadmap. Until
+  then, keep token names unique across the codebase you scan.
+- **Convention wiring is a guess.** Parameters not typed as a declared token
+  may be wired by the `IFoo` → `Foo`/`FooService` naming heuristic; every such
+  match is reported, ambiguous matches are never wired, and `--strict` rejects
+  them (see [Token resolution](#token-resolution-and-the-naming-heuristic)).
+- A singleton's factory runs at registration, so **registration order matters**
+  (the generator emits services in topological order for you; use
+  `lazySingleton` to defer construction).
+- The generated manifest grows with the number of services.
+
+The decorators work under both TC39 (Stage 3) and legacy
 (`experimentalDecorators`) modes — they're read from source at build time, so
 your `tsconfig` decorator setting doesn't change the wiring.
 
@@ -444,7 +496,7 @@ Diadem is evolving toward an **Architectural Intelligence Platform**. The DI con
 - **Layer 3 — Architectural insights** (started) — cycle detection and scope-safety diagnostics ship today in `diadem build --strict`; coupling metrics, boundary enforcement, and health scoring to come
 - **Layer 4 — Ecosystem** (future) — VS Code extension, CI/CD checks, dashboards, documentation generators
 
-### Shipped (v0.2.x → v0.3)
+### Shipped (v0.2.x → v0.4)
 
 **v0.2.x** — Runtime foundation maturity
 1. ✅ `diadem build --watch` *(0.2.0)*.
@@ -456,28 +508,32 @@ Diadem is evolving toward an **Architectural Intelligence Platform**. The DI con
 5. ✅ True lazy in compiled mode (honor `lazySingleton` instead of eager).
 6. ✅ **Multi-binding** — `@singleton(IPlugin, { multi: true })` + `resolveAll` for plugin architectures.
 
-### v0.4 — Canonical graph (Layer 2)
+**v0.4** — CI guardrails & no silent guesses
+7. ✅ **`diadem check`** — non-mutating drift check for CI: regenerates in memory and fails if the committed output is stale.
+8. ✅ **Heuristic-wiring diagnostics** — naming-convention matches are always reported and fail `--strict`; ambiguous matches are never wired (previously the first scan-order match was wired silently).
+
+### v0.5 — Canonical graph (Layer 2)
 
 With the runtime foundation complete, the graph becomes the product:
 
-7. **Graph as a stable artifact** — `diadem graph --emit json` with a versioned schema (services, lifecycles, environments, edges, externals), so tools can consume the architecture model without parsing TypeScript.
-8. **Modules & boundaries** — declare bounded contexts with private providers and an explicit public surface; the graph records every edge that crosses a boundary.
-9. **Architecture APIs** — a programmatic `analyzeGraph()` entry point (the CLI already uses it internally) for custom tooling.
+9. **Graph as a stable artifact** — `diadem graph --emit json` with a versioned schema (services, lifecycles, environments, edges, externals), so tools can consume the architecture model without parsing TypeScript.
+10. **Modules & boundaries** — declare bounded contexts with private providers and an explicit public surface; the graph records every edge that crosses a boundary.
+11. **Architecture APIs** — a programmatic `analyzeGraph()` entry point (the CLI already uses it internally) for custom tooling.
 
-### v0.5 — Architectural insights (Layer 3)
+### v0.6 — Architectural insights (Layer 3)
 
-Analysis on top of the canonical graph. Cycle detection and the scope-safety diagnostics (captive scoped dependencies, multi-binding misuse, env-ambiguous tokens) already ship in `diadem build --strict` — this layer generalizes them:
+Analysis on top of the canonical graph. Cycle detection and the scope-safety diagnostics (captive scoped dependencies, multi-binding misuse, env-ambiguous tokens, heuristic wiring) already ship in `diadem build --strict` — this layer generalizes them:
 
-10. **Boundary enforcement** — fail the build when an edge violates a declared module boundary.
-11. **Coupling & health metrics** — afferent/efferent coupling, instability, and hotspot scoring per module, with CI-friendly output.
-12. **Drift detection** — diff two graph artifacts (main vs. PR) and report new cycles, new boundary crossings, and removed seams.
+12. **Boundary enforcement** — fail the build when an edge violates a declared module boundary.
+13. **Coupling & health metrics** — afferent/efferent coupling, instability, and hotspot scoring per module, with CI-friendly output.
+14. **Drift detection** — diff two graph artifacts (main vs. PR) and report new cycles, new boundary crossings, and removed seams.
 
 ### Layer 4 & runtime conveniences (future)
 
-13. Framework adapters (Express/Fastify per-request scope, React provider).
-14. VS Code extension, CI/CD checks, dashboards, documentation generators — consumers of the Layer 2 graph.
+15. Framework adapters (Express/Fastify per-request scope, React provider).
+16. VS Code extension, CI/CD checks, dashboards, documentation generators — consumers of the Layer 2 graph.
 
-**Later / optional:** Named/qualified bindings, circular-dependency escape, property/setter injection, type-driven `--strict`, unused-service detection, offline graph viewer.
+**Later / optional:** `--type-check` (an opt-in `ts.Program` pass for structural implements-verification and cross-package token disambiguation — closes the name-based-identity gap for large monorepos), named/qualified bindings, circular-dependency escape, property/setter injection, unused-service detection, offline graph viewer.
 
 **Non-goals**
 - A custom-transformer mode for `resolve<IFoo>()` / interface tokens. That's

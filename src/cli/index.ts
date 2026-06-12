@@ -4,6 +4,7 @@
  *
  * Usage:
  *   diadem build [options]    Generate the manifest (or compiled wiring)
+ *   diadem check [options]    Regenerate in memory and fail if the committed output drifts
  *   diadem graph [options]    Write an interactive HTML dependency-graph viewer
  *
  * Options:
@@ -28,7 +29,13 @@ import {
   type DiademConfig,
   type DiademConfigInput
 } from './config'
-import { generateGraph, generateManifest, renderGraph } from './generator'
+import {
+  checkManifest,
+  generateGraph,
+  generateManifest,
+  renderGraph,
+  type GenerateResult
+} from './generator'
 
 interface ParsedArgs {
   command: string
@@ -146,6 +153,8 @@ const HELP = `diadem — build-time DI manifest generator
 
 Usage:
   diadem build [options]    Generate the service manifest (or compiled wiring)
+  diadem check [options]    Regenerate in memory and exit non-zero if the
+                            committed output drifts (nothing is written) — for CI
   diadem graph [options]    Write an interactive HTML dependency-graph viewer
 
 Options:
@@ -161,11 +170,12 @@ Options:
   --serve              graph: serve on a local port instead of writing a file
   --port <n>           graph: port for --serve (default 4321)
   --cwd <dir>          Project root. Default: current directory
-  --fail-on-cycle      build: exit non-zero if a dependency cycle is detected
-  --strict             build: exit non-zero on cycles, ambiguous tokens, captive
-                       scoped dependencies, multi-bound tokens injected as single
-                       parameters, or required dependencies with no implementing
-                       service
+  --fail-on-cycle      build/check: exit non-zero if a dependency cycle is detected
+  --strict             build/check: exit non-zero on cycles, ambiguous tokens,
+                       captive scoped dependencies, multi-bound tokens injected
+                       as single parameters, required dependencies with no
+                       implementing service, or dependencies wired by naming
+                       heuristic instead of a declared token
   -h, --help           Show this help
 
 A diadem.config.json in the project root is merged under CLI flags.
@@ -249,13 +259,15 @@ function runGraph(args: ParsedArgs): void {
   }
 }
 
-/** Run one build, printing results. Returns true if it was a strict/cycle failure. */
-function buildOnce(config: DiademConfig, args: ParsedArgs): boolean {
-  const result = generateManifest(config)
-
-  process.stdout.write(
-    `diadem: wrote ${result.serviceCount} services to ${result.outFile}\n`
-  )
+/**
+ * Print the analysis diagnostics shared by `build` and `check`. Returns true
+ * when the result violates --strict / --fail-on-cycle.
+ */
+function printDiagnostics(
+  result: GenerateResult,
+  config: DiademConfig,
+  args: ParsedArgs
+): boolean {
   if (result.externalDependencies > 0) {
     process.stdout.write(
       `diadem: ${result.externalDependencies} external dependencies (not container-managed)\n`
@@ -294,6 +306,20 @@ function buildOnce(config: DiademConfig, args: ParsedArgs): boolean {
         `multi-bindings — use container.resolveAll(${injection.token})\n`
     )
   }
+  for (const h of result.heuristicResolutions) {
+    process.stderr.write(
+      `diadem: warning — ${h.service} (${h.paramName}) was wired to ${h.implementingService} ` +
+        `by naming heuristic; ${h.typeName} is not a declared token. Declare it on the ` +
+        `implementation (e.g. @singleton(${h.typeName})) to make the binding explicit\n`
+    )
+  }
+  for (const a of result.heuristicAmbiguities) {
+    process.stderr.write(
+      `diadem: warning — ${a.service} (${a.paramName}) requires ${a.typeName}, which matches ` +
+        `multiple services by naming heuristic (${a.candidates.join(', ')}); left unresolved ` +
+        `rather than guessing — declare ${a.typeName} as a token on the intended implementation\n`
+    )
+  }
   if (result.cycles.length > 0) {
     process.stderr.write(
       `diadem: warning — dependency cycle(s) detected: ${result.cycles.join(', ')}\n`
@@ -314,8 +340,47 @@ function buildOnce(config: DiademConfig, args: ParsedArgs): boolean {
     (result.unresolved.length > 0 ||
       result.duplicateTokens.length > 0 ||
       result.captiveDependencies.length > 0 ||
-      result.multiInjections.length > 0)
+      result.multiInjections.length > 0 ||
+      result.heuristicResolutions.length > 0 ||
+      result.heuristicAmbiguities.length > 0)
   return cycleViolation || strictViolation
+}
+
+/** Run one build, printing results. Returns true if it was a strict/cycle failure. */
+function buildOnce(config: DiademConfig, args: ParsedArgs): boolean {
+  const result = generateManifest(config)
+  process.stdout.write(
+    `diadem: wrote ${result.serviceCount} services to ${result.outFile}\n`
+  )
+  return printDiagnostics(result, config, args)
+}
+
+/**
+ * Non-mutating drift check for CI: regenerate in memory, compare with the
+ * committed output, exit non-zero on drift (or strict violations).
+ */
+function runCheck(args: ParsedArgs): void {
+  const config = loadConfig(args.cwd, args.overrides)
+  const result = checkManifest(config)
+  const violation = printDiagnostics(result, config, args)
+
+  if (result.missing) {
+    process.stderr.write(
+      `diadem: check failed — ${result.outFile} does not exist; run \`diadem build\`\n`
+    )
+  } else if (!result.upToDate) {
+    process.stderr.write(
+      `diadem: check failed — ${result.outFile} is stale; run \`diadem build\` and commit the result\n`
+    )
+  } else {
+    process.stdout.write(
+      `diadem: ${result.outFile} is up to date (${result.serviceCount} services)\n`
+    )
+  }
+
+  if (!result.upToDate || violation) {
+    process.exit(1)
+  }
 }
 
 const activeWatchers: ReturnType<typeof watch>[] = []
@@ -392,6 +457,11 @@ function main(): void {
 
   if (args.command === 'graph') {
     runGraph(args)
+    return
+  }
+
+  if (args.command === 'check') {
+    runCheck(args)
     return
   }
 
